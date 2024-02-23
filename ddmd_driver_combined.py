@@ -8,6 +8,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from sklearn.cluster import KMeans
+from itertools import product
 
 import os
 from pathlib import Path
@@ -21,13 +22,35 @@ from westpa.core.we_driver import WEDriver
 log = logging.getLogger(__name__)
 
 class DeepDriveMDDriver(WEDriver, ABC):
+    def _process_args(self):
+        float_class = ['split_weight_limit', 'merge_weight_limit']
+        int_class = ['update_interval', 'lag_iterations', 'lof_n_neighbors', 
+                     'lof_iteration_history', 'num_we_splits', 'num_trial_splits']
+                 
+        self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
+        self.cfg.update({'train_path': None, 'machine_learning_method': None})
+        for key in self.cfg:
+            if key in int_class:
+                setattr(self, key, int(self.cfg[key]))
+            elif key in float_class:
+                setattr(self, key, float(self.cfg[key]))
+            else:
+                setattr(self, key, self.cfg[key])
+
     def __init__(self, rc=None, system=None):
         super().__init__(rc, system)
+
+        self._process_args()
 
         self.niter: int = 0
         self.nsegs: int = 0
         self.nframes: int = 0
         self.cur_pcoords: npt.ArrayLike = []
+        self.rng = np.random.default_rng()
+        temp = np.asarray(list(product(range(self.num_we_splits+1), repeat=self.num_we_splits)), dtype=int)
+        self.split_possible = temp[np.sum(temp, axis=1) == self.num_we_splits]
+        self.split_total = sum(self.split_possible)
+        del temp
 
         # Note: Several of the getter methods that return npt.ArrayLike
         # objects use a [:, 1:] index trick to avoid the initial frame
@@ -52,23 +75,14 @@ class DeepDriveMDDriver(WEDriver, ABC):
         self, bin: Bin, to_split: Sequence[Segment], split_into: int
     ) -> None:
 
-        limit = self.num_we_splits
-        choices = np.zeros((len(to_split)))
-        for idx, segment in enumerate(to_split):
-            bin.remove(segment)
-
-            if idx+1 == self.num_we_splits:
-                split_into_custom = limit
-            else:
-                split_into_custom = np.random.randint(limit+1)
-
-            limit -= split_into_custom
-            choices[idx] = split_into_custom
-          
-            new_segments_list = self._split_walker(segment, split_into_custom +1, bin)
+        chosen_pick = self.split_possible[self.rng.integers(self.split_total)][0]
+        
+        for segments, split_into_custom  in zip(to_split, chosen_pick):
+            bin.remove(segments)
+            new_segments_list = self._split_walker(segments, split_into_custom+1, bin)
             bin.update(new_segments_list)
         
-        print(f'split choices: {choices}')
+        print(f'split choices: {chosen_pick}')
 
     def _merge_by_data(self, bin: Bin, to_merge: Sequence[Segment]) -> None:
         bin.difference_update(to_merge)
@@ -240,25 +254,9 @@ class DeepDriveMDDriver(WEDriver, ABC):
 
 
 class CustomDriver(DeepDriveMDDriver):
-    def _process_args(self):
-        float_class = ['split_weight_limit', 'merge_weight_limit']
-        int_class = ['update_interval', 'lag_iterations', 'lof_n_neighbors', 
-                     'lof_iteration_history', 'num_we_splits', 'num_trial_splits']
-                 
-        self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
-        self.cfg.update({'train_path': None, 'machine_learning_method': None})
-        for key in self.cfg:
-            if key in int_class:
-                setattr(self, key, int(self.cfg[key]))
-            elif key in float_class:
-                setattr(self, key, float(self.cfg[key]))
-            else:
-                setattr(self, key, self.cfg[key])
-
     def __init__(self, rc=None, system=None):
         super().__init__(rc, system)
         
-        self._process_args()
         self.base_training_data_path = expandvars(f'$WEST_SIM_ROOT/common_files/train.npy')
          
         self.log_path = Path(f'{self.output_path}/westpa-ddmd-logs')
