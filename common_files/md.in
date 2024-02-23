@@ -1,0 +1,28 @@
+Implicit solvent 10 ps
+&cntrl
+  ntx = 5,                             
+  ntwx = 250, 
+  ntwe = 0, 
+  ntwr = 250,     
+  ntpr = 250,                 
+  ntwv = -1
+  ioutfm=1, 
+  ntxo=2,                      
+  imin = 0,
+  nstlim = 2500, 
+  dt = 0.004, 
+  ntt = 3,
+  gamma_ln=80.,
+  temp0 = 275.0,   
+  nscm = 1000,
+  ig = RAND,
+  irest = 1,
+  ntc= 2, 
+  ntf = 2, 
+  cut = 1000,           
+  igb=8,
+  gbsa=0,
+  surften=0.005,
+  ntb = 0, 
+  saltcon=0.15, 
+&end

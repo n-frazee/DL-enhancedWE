@@ -1,0 +1,6 @@
+ddwe-logs
+istates
+traj_segs
+seg_logs
+*.h5
+*.log
