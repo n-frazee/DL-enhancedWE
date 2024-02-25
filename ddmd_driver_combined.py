@@ -230,6 +230,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
                 to_split_inds, merge_groups_inds = self.run(cur_segments)
                 if merge_groups_inds is not None:
                     check = [len(i) for i in merge_groups_inds]
+        
                 if to_split_inds is not None and merge_groups_inds is not None and np.max(check) <= self.num_we_splits +1 and np.min(check) > 0:
                     to_split = np.array([segments[to_split_inds]])[0]
 

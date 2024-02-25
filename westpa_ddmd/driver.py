@@ -54,6 +54,55 @@ class DeepDriveMDDriver(WEDriver, ABC):
         new_segment, parent = self._merge_walkers(to_merge, None, bin)
         bin.add(new_segment)
 
+    def get_prev_dcoords(self, iterations: int) -> npt.ArrayLike:
+        """Collect coordinates from previous iterations.
+
+        Parameters
+        ----------
+        iterations : int
+            Number of previous iterations to collect.
+
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, 3)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        back_coords = []
+        with data_manager.lock:
+            for i in range(self.niter - iterations, self.niter):
+                iter_group = data_manager.get_iter_group(i)
+                coords_raw = iter_group["auxdata/dmatrix"][:]
+                for seg in coords_raw[:, 1:]:
+                    back_coords.append(seg)
+
+        return back_coords
+
+    def get_restart_dcoords(self) -> npt.ArrayLike:
+        """Collect coordinates for restart from previous iteration.
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, 3)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        back_coords = []
+        with data_manager.lock:
+            iter_group = data_manager.get_iter_group(self.niter)
+            coords_raw = iter_group["auxdata/dmatrix"][:]
+            for seg in coords_raw[:, 1:]:
+                back_coords.append(seg)
+
+        return back_coords
+
     def get_prev_rcoords(self, iterations: int) -> npt.ArrayLike:
         """Collect coordinates from previous iterations.
 
@@ -76,7 +125,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         with data_manager.lock:
             for i in range(self.niter - iterations, self.niter):
                 iter_group = data_manager.get_iter_group(i)
-                coords_raw = iter_group["auxdata/rcoord"][:]
+                coords_raw = iter_group["auxdata/coord"][:]
                 coords_raw = coords_raw.reshape((self.nsegs, self.nframes + 1, -1, 3))
                 for seg in coords_raw[:, 1:]:
                     back_coords.append(seg)
@@ -84,7 +133,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         return back_coords
 
     def get_restart_rcoords(self) -> npt.ArrayLike:
-        """Collect coordinates for restart from pervious iteration.
+        """Collect coordinates for restart from previous iteration.
         Returns
         -------
         npt.ArrayLike
@@ -98,7 +147,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         back_coords = []
         with data_manager.lock:
             iter_group = data_manager.get_iter_group(self.niter)
-            coords_raw = iter_group["auxdata/rcoord"][:]
+            coords_raw = iter_group["auxdata/coord"][:]
             coords_raw = coords_raw.reshape((self.nsegs, self.nframes + 1, -1, 3))
             for seg in coords_raw[:, 1:]:
                 back_coords.append(seg)
@@ -138,6 +187,13 @@ class DeepDriveMDDriver(WEDriver, ABC):
         """Concatenate the coordinates frames from each segment."""
         rcoords = np.array(list(seg.data["rcoord"] for seg in segments))
         return rcoords.reshape(self.nsegs, self.nframes + 1, -1, 3)[:, 1:]
+        # return rcoords.reshape(self.nsegs, self.nframes, -1, 3)[:, 1:]
+
+    def get_dcoords(self, segments: Sequence[Segment]) -> npt.ArrayLike:
+        """Concatenate the coordinates frames from each segment."""
+        dcoords = np.array(list(seg.data["dmatrix"] for seg in segments))
+        return dcoords
+        #return rcoords.reshape(self.nsegs, self.nframes + 1, -1, 3)[:, 1:]
         # return rcoords.reshape(self.nsegs, self.nframes, -1, 3)[:, 1:]
 
     def get_pcoords(self, segments: Sequence[Segment]) -> npt.ArrayLike:
