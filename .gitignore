@@ -4,3 +4,4 @@ traj_segs
 seg_logs
 *.h5
 *.log
+__pycache__/
