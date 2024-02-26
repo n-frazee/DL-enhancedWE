@@ -394,8 +394,8 @@ class CVAESettings(BaseSettings):
     affine_dropouts: List[float] = [0.5]
     latent_dim: int = 3
     lambda_rec: float = 1.0
-    num_data_workers: int = 4
-    #prefetch_factor: int = None
+    num_data_workers: int = 0
+    prefetch_factor: Optional[int] = None
     batch_size: int = 64
     device: str = "cuda"
     optimizer_name: str = "RMSprop"
@@ -473,6 +473,8 @@ class MachineLearningMethod:
         pd.DataFrame(self.autoencoder.loss_curve_).plot().get_figure().savefig(
             str(self.train_path / "model_loss_curve.png")
         )
+        
+        pd.DataFrame(self.autoencoder.loss_curve_).to_csv(self.train_path / "loss.csv")
 
         z, *_ = self.autoencoder.predict(
             contact_maps, checkpoint=self.most_recent_checkpoint_path
