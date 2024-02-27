@@ -91,7 +91,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
     ) -> None:
         
         chosen_pick = self.split_possible[self.rng.integers(self.split_total)][0]
-        print(chosen_pick)
+        print(f'split choice: {chosen_pick}')
         
         for segments, split_into_custom  in zip(to_split, chosen_pick):
             bin.remove(segments)
@@ -310,12 +310,14 @@ class DeepDriveMDDriver(WEDriver, ABC):
                     
                     self._split_by_data(bin_, to_split, split_into=2)
 
-                    for to_merge_inds in merge_groups_inds:
+                    skip_merged = []
+                    for k_id, to_merge_inds in enumerate(merge_groups_inds):
                         if len(to_merge_inds) > 1:
                             to_merge = segments[to_merge_inds]
                             self._merge_by_data(bin_, to_merge)
                         else:
-                            print(f'kmeans only has 1')
+                            skip_merged.append(k_id)
+                    print(f'skipped merging for kmeans clusters {skip_merged}')
                 else:
                     print(f'skipped due to kmeans')
 
@@ -387,7 +389,7 @@ class CVAESettings(BaseSettings):
     """Settings for mdlearn SymmetricConv2dVAETrainer object."""
 
     input_shape: Tuple[int, int, int] = (1, 40, 40)
-    filters: List[int] = [32, 32, 32, 32]
+    filters: List[int] = [16, 16, 16, 16]
     kernels: List[int] = [3, 3, 3, 3]
     strides: List[int] = [1, 1, 1, 2]
     affine_widths: List[int] = [128]
@@ -400,9 +402,9 @@ class CVAESettings(BaseSettings):
     device: str = "cuda"
     optimizer_name: str = "RMSprop"
     optimizer_hparams: Dict[str, Any] = {"lr": 0.001, "weight_decay": 0.00001}
-    epochs: int = 20
-    checkpoint_log_every: int = 20
-    plot_log_every: int = 20
+    epochs: int = 100
+    checkpoint_log_every: int = 25
+    plot_log_every: int = 25
     plot_n_samples: int = 5000
     plot_method: Optional[str] = "raw"
 
@@ -645,10 +647,10 @@ class CustomDriver(DeepDriveMDDriver):
         # Get data for sorting
         
         pcoord = np.concatenate(self.get_pcoords(segments)[:, -1])
-        #try:
-        #    rmsd = self.get_auxdata(segments, "rmsd")[:, -1]
-        #except KeyError:
-        #    rmsd = self.get_restart_auxdata("rmsd")[:, -1]
+        try:
+            final_state = self.get_auxdata(segments, "state_indices")[:, -1]
+        except KeyError:
+            final_state = self.get_restart_auxdata("state_indices")[:, -1]
         
         weight = self.get_weights(segments)[:]
         df = pd.DataFrame(
@@ -656,7 +658,7 @@ class CustomDriver(DeepDriveMDDriver):
                 "nof": nof_per_segment,
                 "inds": np.arange(self.nsegs),
                 "pcoord": pcoord,
-                #"rmsd": rmsd,
+                "cluster_id": final_state,
                 "weight": weight,
             }
         ).sort_values("nof")    
