@@ -53,27 +53,31 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
 
     print(f'{len(bin)} segments in this bin')
     if n_iter <= 1:
-        # Don't do grouping in the first iteration/initialization, can't get the dmatrices.
+    #    # Don't do grouping in the first iteration/initialization, can't get the dmatrices.
         return [{i for i in bin}]
         #bin = np.array(sorted(we_driver.next_iter_binning[ibin], key=operator.attrgetter('parent_id')), dtype=np.object_)
 
     # Grab all the d-matrices from the last iteration (n_iter-1), will be in seg_id order by default.
     # TODO: Hope we have some way to simplify this... WESTPA 3 function...
-    dcoords = np.concatenate(we_driver.get_prev_dcoords(1))
-    ibstate_group = self.get_iter_group(n_iter)['ibstates']
 
+    dcoords = np.concatenate(we_driver.get_prev_dcoords(1))
+    ibstate_group = westpa.rc.get_data_manager().get_iter_group(n_iter-1)['ibstates']
+
+    #print(ibstate_group)
     synd_model_path = expandvars(kwargs['synd_model'])
     backmap_path = expandvars(kwargs['dmatrix_map'])
-    
     
     chosen_dcoords = []
     for idx, seg in enumerate(bin):
         #print(seg.wtg_parent_ids)
         if seg.parent_id < 0:
-            auxref = tostr(ibstate_group[-int(seg.parent_id + 1)]['basis_auxref'])
+            istate_id = ibstate_group['istate_index']['basis_state_id', -int(seg.parent_id + 1)]
+            #print(istate_id)
+            auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
+            #print(auxref)
             try:
                 dmatrix = synd_model.backmap([auxref])
-            except NameError:
+            except UnboundLocalError:
                 synd_model = load_synd_model(synd_model_path, backmap_path)
                 dmatrix = synd_model.backmap([auxref])
 
