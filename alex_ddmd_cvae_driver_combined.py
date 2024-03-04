@@ -59,6 +59,24 @@ class LS_Cluster_Driver(WEDriver):
             self.CVAESettings.update({'prefetch_factor': None})
 
 
+    def load_synd_model(self):
+        from synd.core import load_model
+        import pickle
+
+        subgroup_args = westpa.rc.config.get(['west', 'drivers', 'subgroup_arguments'])
+        synd_model_path = expandvars(subgroup_args['synd_model'])
+        backmap_path = expandvars(subgroup_args['dmatrix_map'])
+
+        synd_model = load_model(synd_model_path)
+
+        with open(backmap_path, 'rb') as infile:
+            dmatrix_map = pickle.load(infile)
+
+        synd_model.add_backmapper(dmatrix_map.get, name='dmatrix')
+
+        return synd_model
+
+
     def __init__(self, rc=None, system=None):
         super().__init__(rc, system)
         
@@ -76,6 +94,8 @@ class LS_Cluster_Driver(WEDriver):
         self.split_total = sum(self.split_possible)
         self.autoencoder = SymmetricConv2dVAETrainer(**self.CVAESettings)
         self.autoencoder._load_checkpoint(expandvars(rc.config.get(['west','ddmd', 'checkpoint_model'])), map_location=self.map_location)
+
+        self.synd_model = self.load_synd_model()
 
         del temp
 

@@ -7,7 +7,6 @@ from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
 import operator
 from scipy.sparse import coo_matrix
 import pickle
-import synd
 from westpa.core.h5io import tostr
 from os.path import expandvars
 
@@ -29,17 +28,6 @@ def compute_sparse_contact_map(coords: np.ndarray) -> np.ndarray:
     cols = [coo.col.astype("int16") for coo in coo_contact_maps]
     # Concatenate the rows and cols into a single array representing the contact maps
     return [np.concatenate(row_col) for row_col in zip(rows, cols)]
-
-
-def load_synd_model(synd_model_path, backmap_path):
-    synd_model = synd.core.load_model(synd_model_path)
-
-    with open(backmap_path, 'rb') as infile:
-        dmatrix_map = pickle.load(infile)
-
-    synd_model.add_backmapper(dmatrix_map.get, name='dmatrix')
-
-    return synd_model
 
 
 def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
@@ -64,8 +52,6 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
     ibstate_group = westpa.rc.get_data_manager().get_iter_group(n_iter-1)['ibstates']
 
     #print(ibstate_group)
-    synd_model_path = expandvars(kwargs['synd_model'])
-    backmap_path = expandvars(kwargs['dmatrix_map'])
     
     chosen_dcoords = []
     for idx, seg in enumerate(bin):
@@ -75,12 +61,8 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
             #print(istate_id)
             auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
             #print(auxref)
-            try:
-                dmatrix = synd_model.backmap([auxref])
-            except UnboundLocalError:
-                synd_model = load_synd_model(synd_model_path, backmap_path)
-                dmatrix = synd_model.backmap([auxref])
 
+            dmatrix = self.synd_model.backmap([auxref])
             chosen_dcoords.append(dmatrix)  # This will likely mismatch when recycling... Need a way to get the dmatrix for ibstates.
         else:
             chosen_dcoords.append(dcoords[seg.parent_id]) 
