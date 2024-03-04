@@ -85,6 +85,26 @@ class LS_Cluster_Driver(WEDriver):
         # previous iterations segment which is helpful for rate-constant
         # calculations, but not helpful for DeepDriveMD.
 
+    def get_ibstates_ref(self) -> npt.ArrayLike:
+        """Collect ibstates from information.
+
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, Natoms)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        back_coords = []
+        with data_manager.lock:
+            iter_group = data_manager.get_iter_group(i)
+            coords_raw = iter_group["auxdata/dmatrix"][:]
+
+        return back_coords
+
     def get_prev_dcoords(self, iterations: int) -> npt.ArrayLike:
         """Collect coordinates from previous iterations.
 
