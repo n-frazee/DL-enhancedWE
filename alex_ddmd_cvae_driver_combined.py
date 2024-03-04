@@ -26,14 +26,197 @@ import westpa
 from westpa.core.binning import Bin
 from westpa.core.segment import Segment
 from westpa.core.we_driver import WEDriver
+import operator
 
 log = logging.getLogger(__name__)
 
-# TODO: This is a temporary solution until we can pass
-# arguments through the westpa config. Requires a
-# deepdrivemd.yaml file in the same directory as this script
-CONFIG_PATH = Path(__file__).parent / "deepdrivemd.yaml"
-SIM_ROOT_PATH = Path(__file__).parent
+
+class LS_Cluster_Driver(WEDriver):
+    def _process_args(self):
+        float_class = ['split_weight_limit', 'merge_weight_limit']
+        int_class = ['update_interval', 'lag_iterations', 'lof_n_neighbors', 
+                     'lof_iteration_history', 'num_we_splits', 'num_trial_splits']
+                 
+        self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
+        self.cfg.update({'train_path': None, 'machine_learning_method': None})
+        for key in self.cfg:
+            if key in int_class:
+                setattr(self, key, int(self.cfg[key]))
+            elif key in float_class:
+                setattr(self, key, float(self.cfg[key]))
+            else:
+                setattr(self, key, self.cfg[key])
+
+        if 'map_location' not in self.cfg.keys():
+            self.map_location = 'cpu'
+
+        self.CVAESettings = westpa.rc.config.get(['mdlearn', 'cvae'], {})
+
+        if 'device' not in self.CVAESettings.keys():
+            self.CVAESettings.update({'device': 'cpu'})
+
+        if 'prefetch_factor' not in self.CVAESettings.keys():
+            self.CVAESettings.update({'prefetch_factor': None})
+
+
+    def __init__(self, rc=None, system=None):
+        super().__init__(rc, system)
+        
+        self._process_args()
+
+        westpa.rc.pstatus(self.CVAESettings)
+
+        self.niter: int = 0
+        self.nsegs: int = 0
+        self.nframes: int = 0
+        self.cur_pcoords: npt.ArrayLike = []
+        self.rng = np.random.default_rng()
+        temp = np.asarray(list(product(range(self.num_we_splits+1), repeat=self.num_we_splits)), dtype=int)
+        self.split_possible = temp[np.sum(temp, axis=1) == self.num_we_splits]
+        self.split_total = sum(self.split_possible)
+        self.autoencoder = SymmetricConv2dVAETrainer(**self.CVAESettings)
+        self.autoencoder._load_checkpoint(expandvars(rc.config.get(['west','ddmd', 'checkpoint_model'])), map_location=self.map_location)
+
+        del temp
+
+        # Note: Several of the getter methods that return npt.ArrayLike
+        # objects use a [:, 1:] index trick to avoid the initial frame
+        # in westpa segments which corresponds to the last frame of the
+        # previous iterations segment which is helpful for rate-constant
+        # calculations, but not helpful for DeepDriveMD.
+
+    def get_prev_dcoords(self, iterations: int) -> npt.ArrayLike:
+        """Collect coordinates from previous iterations.
+
+        Parameters
+        ----------
+        iterations : int
+            Number of previous iterations to collect.
+
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, Natoms)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        back_coords = []
+        with data_manager.lock:
+            for i in range(self.niter - iterations, self.niter):
+                iter_group = data_manager.get_iter_group(i)
+                coords_raw = iter_group["auxdata/dmatrix"][:]
+                for seg in coords_raw[:, 1:]:
+                    back_coords.append(seg)
+
+        return back_coords
+
+    def get_restart_dcoords(self) -> npt.ArrayLike:
+        """Collect coordinates for restart from previous iteration.
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, Natoms)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        back_coords = []
+        with data_manager.lock:
+            iter_group = data_manager.get_iter_group(self.niter)
+            coords_raw = iter_group["auxdata/dmatrix"][:]
+            for seg in coords_raw[:, 1:]:
+                back_coords.append(seg)
+
+        return back_coords
+
+    def get_dcoords(self, segments: Sequence[Segment]) -> npt.ArrayLike:
+        """Concatenate the coordinates frames from each segment."""
+        dcoords = np.array(list(seg.data["dmatrix"] for seg in segments))
+        return dcoords[:,1:]
+        #return rcoords.reshape(self.nsegs, self.nframes + 1, -1, 3)[:, 1:]
+        # return rcoords.reshape(self.nsegs, self.nframes, -1, 3)[:, 1:]
+
+    def _run_we(self):
+        '''Run recycle/split/merge. Do not call this function directly; instead, use
+        populate_initial(), rebin_current(), or construct_next().'''
+        self._recycle_walkers()
+
+        # sanity check
+        self._check_pre()
+
+        # Regardless of current particle count, always split overweight particles and merge underweight particles
+        # Then and only then adjust for correct particle count
+        total_number_of_subgroups = 0
+        total_number_of_particles = 0
+
+        for ibin, bin in enumerate(self.next_iter_binning):
+            if len(bin) == 0:
+                continue
+
+            for e in bin:
+                self.niter = e.n_iter
+                break
+
+            # Splits the bin into subgroups as defined by the called function
+            target_count = self.bin_target_counts[ibin]
+            subgroups = self.subgroup_function(self, ibin, n_iter=self.niter, **self.subgroup_function_kwargs)
+            total_number_of_subgroups += len(subgroups)
+            # Clear the bin
+            segments = np.array(sorted(bin, key=operator.attrgetter('weight')), dtype=np.object_)
+            weights = np.array(list(map(operator.attrgetter('weight'), segments)))
+            ideal_weight = weights.sum() / target_count
+            bin.clear()
+            # Determines to see whether we have more sub bins than we have target walkers in a bin (or equal to), and then uses
+            # different logic to deal with those cases.  Should devolve to the Huber/Kim algorithm in the case of few subgroups.
+            if len(subgroups) >= target_count:
+                for i in subgroups:
+                    # Merges all members of set i.  Checks to see whether there are any to merge.
+                    if len(i) > 1:
+                        (segment, parent) = self._merge_walkers(
+                            list(i),
+                            np.add.accumulate(np.array(list(map(operator.attrgetter('weight'), i)))),
+                            i,
+                        )
+                        i.clear()
+                        i.add(segment)
+                    # Add all members of the set i to the bin.  This keeps the bins in sync for the adjustment step.
+                    bin.update(i)
+
+                if len(subgroups) > target_count:
+                    self._adjust_count(bin, subgroups, target_count)
+
+            if len(subgroups) < target_count:
+                for i in subgroups:
+                    self._split_by_weight(i, target_count, ideal_weight)
+                    self._merge_by_weight(i, target_count, ideal_weight)
+                    # Same logic here.
+                    bin.update(i)
+                if self.do_adjust_counts:
+                    # A modified adjustment routine is necessary to ensure we don't unnecessarily destroy trajectory pathways.
+                    self._adjust_count(bin, subgroups, target_count)
+            if self.do_thresholds:
+                for i in subgroups:
+                    self._split_by_threshold(bin, i)
+                    self._merge_by_threshold(bin, i)
+                for iseg in bin:
+                    if iseg.weight > self.largest_allowed_weight or iseg.weight < self.smallest_allowed_weight:
+                        log.warning(
+                            f'Unable to fulfill threshold conditions for {iseg}. The given threshold range is likely too small.'
+                        )
+            total_number_of_particles += len(bin)
+        log.debug('Total number of subgroups: {!r}'.format(total_number_of_subgroups))
+
+        self._check_post()
+
+        self.new_weights = self.new_weights or []
+
+        log.debug('used initial states: {!r}'.format(self.used_initial_states))
+        log.debug('available initial states: {!r}'.format(self.avail_initial_states))
 
 
 class DeepDriveMDDriver(WEDriver, ABC):
@@ -114,7 +297,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         Returns
         -------
         npt.ArrayLike
-            Coordinates with shape (N, Nsegments, Nframes, Natoms, 3)
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, Natoms)
         """
         # extract previous iteration data and add to curr_coords
         data_manager = westpa.rc.get_sim_manager().data_manager
@@ -136,7 +319,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         Returns
         -------
         npt.ArrayLike
-            Coordinates with shape (N, Nsegments, Nframes, Natoms, 3)
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, Natoms)
         """
         # extract previous iteration data and add to curr_coords
         data_manager = westpa.rc.get_sim_manager().data_manager
@@ -385,31 +568,25 @@ class ExperimentSettings(BaseSettings):
     _mkdir_output_path = mkdir_validator("output_path")
 
 
-class CVAESettings(BaseSettings):
-    """Settings for mdlearn SymmetricConv2dVAETrainer object."""
-
-    input_shape: Tuple[int, int, int] = (1, 40, 40)
-    filters: List[int] = [16, 16, 16, 16]
-    kernels: List[int] = [3, 3, 3, 3]
-    strides: List[int] = [1, 1, 1, 2]
-    affine_widths: List[int] = [128]
-    affine_dropouts: List[float] = [0.5]
-    latent_dim: int = 3
-    lambda_rec: float = 1.0
-    num_data_workers: int = 0
-    prefetch_factor: Optional[int] = None
-    batch_size: int = 64
-    device: str = "cuda"
-    optimizer_name: str = "RMSprop"
-    optimizer_hparams: Dict[str, Any] = {"lr": 0.001, "weight_decay": 0.00001}
-    epochs: int = 100
-    checkpoint_log_every: int = 25
-    plot_log_every: int = 25
-    plot_n_samples: int = 5000
-    plot_method: Optional[str] = "raw"
-
-
 class MachineLearningMethod:
+    def _process_args(self):
+        float_class = ['lambda_rec']
+        int_class = ['latent_dim', 'num_data_workers','batch_size', 'epochs', 
+                     'checkpoint_log_every', 'plot_log_every', 'plot_n_samples', 'prefetch_factor']
+                 
+        self.cfg = westpa.rc.config.get(['mdlearn', 'cvae'], {})
+        self.cfg.update({'train_path': None, 'machine_learning_method': None})
+        for key in self.cfg:
+            if key in int_class:
+                setattr(self, key, int(self.cfg[key]))
+            elif key in float_class:
+                setattr(self, key, float(self.cfg[key]))
+            else:
+                setattr(self, key, self.cfg[key])
+
+        if device not in self.cfg:
+            self.device = 'cpu'
+
     def __init__(self, train_path: Path, base_training_data_path: Path) -> None:
         """Initialize the machine learning method.
 
@@ -420,14 +597,13 @@ class MachineLearningMethod:
         base_training_data_path : Path
             The path to a set of pre-exisiting training data to help the model properly converge.
         """
+        self._process_args()
+
         self.train_path = train_path
         self.base_training_data_path = base_training_data_path
 
-        # Load the configuration
-        self.cfg = ExperimentSettings.from_yaml(CONFIG_PATH)
-
         # Initialize the model
-        self.autoencoder = SymmetricConv2dVAETrainer(**CVAESettings().dict())
+        self.autoencoder = SymmetricConv2dVAETrainer(**self.cfg())
 
     def compute_sparse_contact_map(self, coords: np.ndarray) -> np.ndarray:
         """Compute the sparse contact maps for a set of coordinate frames."""
@@ -446,12 +622,12 @@ class MachineLearningMethod:
     @property
     def save_path(self) -> Path:
         """Path to save the model."""
-        return self.train_path / "saves"
+        return f'{self.train_path}/saves'
 
     @property
     def most_recent_checkpoint_path(self) -> Path:
         """Get the most recent model checkpoint."""
-        checkpoint_dir = self.save_path / "checkpoints"
+        checkpoint_dir = f'{self.save_path}/checkpoints'
         model_weight_path = natsorted(list(checkpoint_dir.glob("*.pt")))[-1]
         return model_weight_path
 
@@ -473,15 +649,15 @@ class MachineLearningMethod:
 
         # Save the loss curve
         pd.DataFrame(self.autoencoder.loss_curve_).plot().get_figure().savefig(
-            str(self.train_path / "model_loss_curve.png")
+            f'{self.train_path}/model_loss_curve.png'
         )
         
-        pd.DataFrame(self.autoencoder.loss_curve_).to_csv(self.train_path / "loss.csv")
+        pd.DataFrame(self.autoencoder.loss_curve_).to_csv(f'{self.train_path}/loss.csv')
 
         z, *_ = self.autoencoder.predict(
             contact_maps, checkpoint=self.most_recent_checkpoint_path
         )
-        np.save(self.train_path / "z.npy", z[len(base_coords):])
+        np.save(f'{self.train_path}/z.npy', z[len(base_coords):])
 
     def predict(self, coords: np.ndarray) -> np.ndarray:
         """Predict the latent space coordinates for a set of coordinate frames."""
@@ -511,20 +687,20 @@ class CustomDriver(DeepDriveMDDriver):
         self.datasets_path = Path(f'{self.log_path}/datasets')
         os.makedirs(self.datasets_path, exist_ok=True)
 
-        #self.base_training_data_path = SIM_ROOT_PATH / "common_files/train.npy"
+        #self.base_training_data_path = expand_vars(f'$WEST_SIM_ROOT/common_files/train.npy')
         # self.cfg = ExperimentSettings.from_yaml(CONFIG_PATH)
-        #self.log_path = self.cfg.output_path / "westpa-ddmd-logs"
+        #self.log_path = f'{self.cfg.output_path}/westpa-ddmd-logs'
         #self.log_path.mkdir(exist_ok=True)
         #self.machine_learning_method = None
         #self.train_path = None
-        #self.datasets_path = self.log_path / "datasets"
+        #self.datasets_path = f'{self.log_path}/datasets'
         #self.datasets_path.mkdir(exist_ok=True)
 
     def lof_function(self, z: np.ndarray) -> np.ndarray:
         # Load up to the last 50 of all the latent coordinates here
         if self.niter > self.lof_iteration_history:
             embedding_history = [
-                np.load(self.datasets_path / f"z-{p}.npy")
+                np.load(f'{self.datasets_path}/z-{p}.npy')
                 for p in range(self.niter - self.lof_iteration_history, self.niter)
             ]
         else:
@@ -550,11 +726,9 @@ class CustomDriver(DeepDriveMDDriver):
     
     def plot_prev_data(self):
         # Plot the old latent space projections of the training data and iteration data colored by phi
-        old_model_path = (
-            self.log_path
-            / f"ml-iter-{self.niter - self.update_interval}"
-        )
-        training_z = np.load(old_model_path / "z.npy")
+        old_model_path = (f'{self.log_path}/ml-iter-{self.niter - self.update_interval}')
+            
+        training_z = np.load(f'{old_model_path}/z.npy')
                 
         training_z = np.reshape(
             training_z, (-1, self.nframes, training_z.shape[1])
@@ -562,7 +736,7 @@ class CustomDriver(DeepDriveMDDriver):
 
         live_z = np.concatenate(
             [
-                np.load(self.datasets_path / f"last-z-{iter}.npy")
+                np.load(f'{self.datasets_path}/last-z-{iter}.npy')
                 for iter in range(
                     self.niter - self.update_interval, self.niter
                 )
@@ -572,7 +746,7 @@ class CustomDriver(DeepDriveMDDriver):
         z_data = np.concatenate((training_z, live_z))
         pcoord_data = np.concatenate(
             [
-                np.load(self.datasets_path / f"pcoord-{iter}.npy")
+                np.load(f'{self.datasets_path}/pcoord-{iter}.npy')
                 for iter in range(self.niter - int(len(z_data)/self.nsegs), self.niter)
             ]
         )
@@ -583,12 +757,12 @@ class CustomDriver(DeepDriveMDDriver):
         plot_scatter(
             z_data,
             pcoord_data,
-            self.log_path / f"embedding-pcoord-{self.niter}.png",
+            f'{self.log_path}/embedding-pcoord-{self.niter}.png',
         )
         plot_scatter(
             z_data,
             state_data,
-            self.log_path / f"embedding-state-{self.niter}.png",
+            f'{self.log_path}/embedding-state-{self.niter}.png',
         )
         return None
 
@@ -615,12 +789,10 @@ class CustomDriver(DeepDriveMDDriver):
     def run(self, segments: Sequence[Segment]) -> None:
         # Determine the location for the training data/model
         if self.niter < self.update_interval:
-            self.train_path = self.log_path / f"ml-iter-1"
+            self.train_path = f'{self.log_path}/ml-iter-1'
         else:
             self.train_path = (
-                self.log_path
-                / f"ml-iter-{self.niter - self.niter % self.update_interval}"
-            )
+                f'{self.log_path}/ml-iter-{self.niter - self.niter % self.update_interval}')
 
         # Init the ML method
         self.train_path.mkdir(exist_ok=True)
@@ -636,7 +808,7 @@ class CustomDriver(DeepDriveMDDriver):
             all_coords = self.get_restart_dcoords()
 
         # all_coords.shape=(segments, frames, atoms, xyz)
-        np.save(self.datasets_path / f"coords-{self.niter}.npy", all_coords)
+        np.save(f'{self.datasets_path}/coords-{self.niter}.npy', all_coords)
 
         # Train a new model if it's time
         self.train_decider(all_coords)
@@ -719,19 +891,19 @@ class CustomDriver(DeepDriveMDDriver):
 
         # Log dataframes
         print(f"\n{split_df}\n{merge_df}")
-        df.to_csv(self.datasets_path / f"full-niter-{self.niter}.csv")
-        split_df.to_csv(self.datasets_path / f"split-niter-{self.niter}.csv")
-        merge_df.to_csv(self.datasets_path / f"merge-niter-{self.niter}.csv")
+        df.to_csv(f'{self.datasets_path}/full-niter-{self.niter}.csv')
+        split_df.to_csv(f'{self.datasets_path}/split-niter-{self.niter}.csv')
+        merge_df.to_csv(f'{self.datasets_path}/merge-niter-{self.niter}.csv')
 
         # Log the machine learning outputs
-        np.save(self.datasets_path / f"z-{self.niter}.npy", z)
+        np.save(f'{self.datasets_path}/z-{self.niter}.npy', z)
 
         # Save data for plotting
         np.save(
-            self.datasets_path / f"last-z-{self.niter}.npy",
+            f'{self.datasets_path}/last-z-{self.niter}.npy',
             np.reshape(z, (self.nsegs, self.nframes, -1))[:, -1, :],
         )
-        np.save(self.datasets_path / f"pcoord-{self.niter}.npy", pcoord)
+        np.save(f'{self.datasets_path}/pcoord-{self.niter}.npy', pcoord)
 
         return to_split_inds, merge_list
 
