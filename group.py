@@ -40,32 +40,45 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
     bin = we_driver.next_iter_binning[ibin]
 
     print(f'{len(bin)} segments in this bin')
-    if n_iter <= 1:
+    #if n_iter <= 1:
     #    # Don't do grouping in the first iteration/initialization, can't get the dmatrices.
-        return [{i for i in bin}]
+    #    return [{i for i in bin}]
         #bin = np.array(sorted(we_driver.next_iter_binning[ibin], key=operator.attrgetter('parent_id')), dtype=np.object_)
 
     # Grab all the d-matrices from the last iteration (n_iter-1), will be in seg_id order by default.
     # TODO: Hope we have some way to simplify this... WESTPA 3 function...
 
-    dcoords = np.concatenate(we_driver.get_prev_dcoords(1))
-    ibstate_group = westpa.rc.get_data_manager().get_iter_group(n_iter-1)['ibstates']
+    ibstate_group = westpa.rc.get_data_manager().we_h5file['ibstates/0']
 
-    #print(ibstate_group)
-    
-    chosen_dcoords = []
-    for idx, seg in enumerate(bin):
-        #print(seg.wtg_parent_ids)
-        if seg.parent_id < 0:
-            istate_id = ibstate_group['istate_index']['basis_state_id', -int(seg.parent_id + 1)]
+    if n_iter > 1:
+        dcoords = np.concatenate(we_driver.get_prev_dcoords(1))
+    else:  # building the list from scratch
+        dcoords = []
+        for segment in bin:
+            istate_id = ibstate_group['istate_index']['basis_state_id', int(segment.parent_id)]
             #print(istate_id)
             auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
             #print(auxref)
 
-            dmatrix = self.synd_model.backmap([auxref])
-            chosen_dcoords.append(dmatrix)  # This will likely mismatch when recycling... Need a way to get the dmatrix for ibstates.
+            dmatrix = we_driver.synd_model.backmap([auxref])
+            dcoords.append(dmatrix) 
+
+    #print(dcoords)
+
+    chosen_dcoords = []
+    for idx, segment in enumerate(bin):
+        #print(segment)
+        #print(seg.wtg_parent_ids)
+        if segment.parent_id < 0:
+            istate_id = ibstate_group['istate_index']['basis_state_id', -int(segment.parent_id + 1)]
+            #print(istate_id)
+            auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
+            #print(auxref)
+
+            dmatrix = we_driver.synd_model.backmap([auxref])
+            chosen_dcoords.append(dmatrix)
         else:
-            chosen_dcoords.append(dcoords[seg.parent_id]) 
+            chosen_dcoords.append(dcoords[segment.parent_id]) 
 
     scoords = compute_sparse_contact_map(chosen_dcoords)
 
