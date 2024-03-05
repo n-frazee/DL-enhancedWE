@@ -125,13 +125,16 @@ class LS_Cluster_Driver(WEDriver):
 
         return back_coords
 
-    def get_prev_dcoords(self, iterations: int) -> npt.ArrayLike:
+    def get_prev_dcoords(self, iterations: int, upperbound: Optional[int] = None) -> npt.ArrayLike:
         """Collect coordinates from previous iterations.
 
         Parameters
         ----------
         iterations : int
             Number of previous iterations to collect.
+
+        upperbound : Optional[int]
+            The upper bound range (exclusive) of which to get the past dcoords
 
         Returns
         -------
@@ -143,9 +146,12 @@ class LS_Cluster_Driver(WEDriver):
 
         # TODO: If this function is slow, we can try direct h5 reads
 
+        if upperbound is None:
+            upperbound = self.niter
+
         back_coords = []
         with data_manager.lock:
-            for i in range(self.niter - iterations, self.niter):
+            for i in range(upperbound - iterations, upperbound):
                 iter_group = data_manager.get_iter_group(i)
                 coords_raw = iter_group["auxdata/dmatrix"][:]
                 for seg in coords_raw[:, 1:]:
@@ -154,7 +160,7 @@ class LS_Cluster_Driver(WEDriver):
         return back_coords
 
     def get_restart_dcoords(self) -> npt.ArrayLike:
-        """Collect coordinates for restart from previous iteration.
+        """Collect coordinates for restart from current iteration.
         Returns
         -------
         npt.ArrayLike

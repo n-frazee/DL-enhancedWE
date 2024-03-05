@@ -30,7 +30,8 @@ def compute_sparse_contact_map(coords: np.ndarray) -> np.ndarray:
     return [np.concatenate(row_col) for row_col in zip(rows, cols)]
 
 
-def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
+def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, iters_back_to_cluster=10, **kwargs):
+
     # Sort the segments in seg_id order... just making sure.
 
     current_iteration = westpa.rc.get_data_manager().current_iteration
@@ -38,6 +39,7 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
     #print(we_driver.next_iter_binning[ibin])
     #print([segment for segment in we_driver.next_iter_binning[ibin]])
     bin = we_driver.next_iter_binning[ibin]
+    n_segs = len(bin)
 
     print(f'{len(bin)} segments in this bin')
     #if n_iter <= 1:
@@ -51,9 +53,17 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
     ibstate_group = westpa.rc.get_data_manager().we_h5file['ibstates/0']
 
     if n_iter > 1:
-        dcoords = np.concatenate(we_driver.get_prev_dcoords(1))
-    else:  # building the list from scratch
-        dcoords = []
+        past_dcoords = []
+        if iters_back_to_cluster == 0:
+            past_dcoords = []
+        elif n_iter <= iters_back_to_cluster:
+            iters_back_to_cluster = n_iter -1
+            past_dcoords = np.concatenate(we_driver.get_prev_dcoords(iters_back_to_cluster, upperbound=n_iter))
+
+        # Get current iter dcoords
+        curr_dcoords = np.concatenate(we_driver.get_prev_dcoords(1))
+    else:  # building the list from scratch, during first iter
+        past_dcoords, curr_dcoords = [], []
         for segment in bin:
             istate_id = ibstate_group['istate_index']['basis_state_id', int(segment.parent_id)]
             #print(istate_id)
@@ -61,11 +71,15 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
             #print(auxref)
 
             dmatrix = we_driver.synd_model.backmap([auxref])
-            dcoords.append(dmatrix) 
+            curr_dcoords.append(dmatrix) 
 
     #print(dcoords)
 
+    #print(len(curr_dcoords))
+    #print(n_segs)
+
     chosen_dcoords = []
+    to_pop = []
     for idx, segment in enumerate(bin):
         #print(segment)
         #print(seg.wtg_parent_ids)
@@ -78,9 +92,29 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, **kwargs):
             dmatrix = we_driver.synd_model.backmap([auxref])
             chosen_dcoords.append(dmatrix)
         else:
-            chosen_dcoords.append(dcoords[segment.parent_id]) 
+            #print(idx)
+            #print(segment.parent_id)
+            chosen_dcoords.append(curr_dcoords[segment.parent_id])
+            to_pop.append(segment.parent_id)
+    
+    curr_dcoords = np.asarray(curr_dcoords)
+    if len(to_pop) > 0:
+        curr_dcoords = np.delete(curr_dcoords, to_pop, axis=0)
+    final = [np.asarray(i) for i in [chosen_dcoords, curr_dcoords, past_dcoords] if len(i) > 0]
 
-    scoords = compute_sparse_contact_map(chosen_dcoords)
+    #print(len(chosen_dcoords))
+    #print(f'curr_dcoords shape: {curr_dcoords.shape}')
+    #print(len(past_dcoords))
+    #print(final)
+    #print(len(final))
+
+    #print('yay')
+    #if len(final) > 1:
+    #    print(f'{final[0].shape}, {final[1].shape}')
+
+    scoords = compute_sparse_contact_map(np.vstack((final)))
+
+    #print(len(scoords))
 
     X = we_driver.autoencoder.predict(scoords)
 
