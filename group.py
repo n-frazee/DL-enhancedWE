@@ -70,9 +70,9 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, iters_back_to_cluster=10,
             auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
             #print(auxref)
 
-            dmatrix = we_driver.synd_model.backmap([auxref])
-            curr_dcoords.append(dmatrix) 
-
+            dmatrix = we_driver.synd_model.backmap([auxref], mapper='dmatrix')
+            curr_dcoords.append(dmatrix[0])
+            
     #print(dcoords)
 
     #print(len(curr_dcoords))
@@ -89,8 +89,8 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, iters_back_to_cluster=10,
             auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
             #print(auxref)
 
-            dmatrix = we_driver.synd_model.backmap([auxref])
-            chosen_dcoords.append(dmatrix)
+            dmatrix = we_driver.synd_model.backmap([auxref], mapper='dmatrix')
+            chosen_dcoords.append(dmatrix[0])
         else:
             #print(idx)
             #print(segment.parent_id)
