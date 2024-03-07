@@ -90,12 +90,13 @@ class DeepDriveMDDriver(WEDriver, ABC):
         self, bin: Bin, to_split: Sequence[Segment], split_into: int
     ) -> None:
         
-        chosen_pick = self.split_possible[self.rng.integers(self.split_total)][0]
-        print(f'split choice: {chosen_pick}')
+        #chosen_pick = self.split_possible[self.rng.integers(self.split_total)][0]
+        #print(f'split choice: {chosen_pick}')
         
-        for segments, split_into_custom  in zip(to_split, chosen_pick):
+        #for segments, split_into_custom  in zip(to_split, chosen_pick):
+        for segments in to_split:
             bin.remove(segments)
-            new_segments_list = self._split_walker(segments, split_into_custom+1, bin)
+            new_segments_list = self._split_walker(segments, split_into, bin)
             bin.update(new_segments_list)         
 
     def _merge_by_data(self, bin: Bin, to_merge: Sequence[Segment]) -> None:
