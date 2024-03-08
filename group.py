@@ -59,6 +59,8 @@ def ls_kmeans(we_driver, ibin, n_iter=0, n_clusters=5, iters_back_to_cluster=10,
         elif n_iter <= iters_back_to_cluster:
             iters_back_to_cluster = n_iter -1
             past_dcoords = np.concatenate(we_driver.get_prev_dcoords(iters_back_to_cluster, upperbound=n_iter))
+        else:
+            past_dcoords = np.concatenate(we_driver.get_prev_dcoords(iters_back_to_cluster, upperbound=n_iter))
 
         # Get current iter dcoords
         curr_dcoords = np.concatenate(we_driver.get_prev_dcoords(1))
