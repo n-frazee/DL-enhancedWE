@@ -123,7 +123,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
 
         back_coords = []
         with data_manager.lock:
-            for i in range(self.niter - iterations, self.niter):
+            for i in range(self.niter - iterations, self.niter+1):
                 iter_group = data_manager.get_iter_group(i)
                 coords_raw = iter_group["auxdata/dmatrix"][:]
                 for seg in coords_raw[:, 1:]:
