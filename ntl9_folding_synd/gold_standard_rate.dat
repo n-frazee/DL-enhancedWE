@@ -1,0 +1,5 @@
+# Reference Rate
+From Clusters [2129 - 3150] (inclusive, RMSD > 10 A) to cluster 3151 (RMSD < 1.0 A)
+GROSS and NET FLUX GROUND TRUTH is:  5.963305698023305e-06 
+At 10 ps Tau, this is equivalent to 596330 s^-1
+
