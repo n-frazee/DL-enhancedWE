@@ -43,6 +43,8 @@ def binless_ls_kmeans(coords, n_clusters, splitting, iters_back_to_cluster=10, *
     n_iter = we_driver.niter
 
     #print(n_iter)
+    #for i in we_driver.segments:
+    #    print(i)
     #print(we_driver.segments)
 
     #print(f'looking at bin {ibin} for iteration {n_iter}')
@@ -139,6 +141,8 @@ def binless_ls_kmeans(coords, n_clusters, splitting, iters_back_to_cluster=10, *
     if splitting:
         westpa.rc.pstatus(f'cluster centers: {np.sort(cluster_centers_indices)}')
         westpa.rc.pflush()
+
+    #print(labels.shape)
 
     return labels
 
