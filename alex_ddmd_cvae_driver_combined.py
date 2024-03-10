@@ -19,16 +19,353 @@ from itertools import product
 from os.path import expandvars
 
 import os
-from westpa_ddmd.driver import DeepDriveMDDriver
-from westpa_ddmd.config import BaseSettings, mkdir_validator
 
 import westpa
 from westpa.core.binning import Bin
 from westpa.core.segment import Segment
 from westpa.core.we_driver import WEDriver
+from westpa.core.binning import BinlessDriver
 import operator
 
 log = logging.getLogger(__name__)
+
+
+class LS_Cluster_Binless_Driver(BinlessDriver):
+    def assign(self, segments, initializing=False):
+        '''Assign segments to initial and final bins, and update the (internal) lists of used and available
+        initial states. This function is adapted to the MAB scheme, so that the inital and final segments are
+        sent to the bin mapper at the same time, otherwise the inital and final bin boundaries can be inconsistent.'''
+
+        log.debug("BinlessDriver in use.")
+        # collect initial and final coordinates into one place
+        n_segments = len(segments)
+
+        # if self.n_iter > 1:
+        #     past_dcoords = []
+        #     if iters_back_to_cluster == 0:
+        #         past_dcoords = []
+        #     elif self.n_iter <= iters_back_to_cluster:
+        #         iters_back_to_cluster = self.n_iter -1
+        #         past_dcoords = np.concatenate(we_driver.get_prev_dcoords(iters_back_to_cluster, upperbound=n_iter))
+
+        #     # Get current iter dcoords
+        #     curr_dcoords = np.concatenate(we_driver.get_prev_dcoords(1))
+        # else:  # building the list from scratch, during first iter
+        #     past_dcoords, curr_dcoords = [], []
+        #     for segment in bin:
+        #         istate_id = ibstate_group['istate_index']['basis_state_id', int(segment.parent_id)]
+        #         #print(istate_id)
+        #         auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
+        #         #print(auxref)
+
+        #         dmatrix = we_driver.synd_model.backmap([auxref], mapper='dmatrix')
+        #         curr_dcoords.append(dmatrix[0])
+        
+        # chosen_dcoords = []
+        # to_pop = []
+        # for idx, segment in enumerate(bin):
+        #     #print(segment)
+        #     #print(seg.wtg_parent_ids)
+        #     if segment.parent_id < 0:
+        #         istate_id = ibstate_group['istate_index']['basis_state_id', -int(segment.parent_id + 1)]
+        #         #print(istate_id)
+        #         auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
+        #         #print(auxref)
+
+        #         dmatrix = we_driver.synd_model.backmap([auxref], mapper='dmatrix')
+        #         chosen_dcoords.append(dmatrix[0])
+        #     else:
+        #         #print(idx)
+        #         #print(segment.parent_id)
+        #         chosen_dcoords.append(curr_dcoords[segment.parent_id])
+        #         to_pop.append(segment.parent_id)
+        
+        # curr_dcoords = np.asarray(curr_dcoords)
+        # if len(to_pop) > 0:
+        #     curr_dcoords = np.delete(curr_dcoords, to_pop, axis=0)
+        # final = [np.asarray(i) for i in [chosen_dcoords, curr_dcoords, past_dcoords] if len(i) > 0]
+
+
+        all_pcoords = np.empty((n_segments * 2, self.system.pcoord_ndim + 2), dtype=self.system.pcoord_dtype)
+
+
+        for iseg, segment in enumerate(segments):
+            all_pcoords[iseg] = np.append(segment.pcoord[0, :], [segment.weight, 0.0])
+            all_pcoords[n_segments + iseg] = np.append(segment.pcoord[-1, :], [segment.weight, 1.0])
+
+
+        #print(all_pcoords)
+        #np.save('all_pcoords.npy', all_pcoords)
+
+        self.segments = segments
+        # assign based on initial and final progress coordinates
+        assignments = self.bin_mapper.assign(all_pcoords)
+        initial_assignments = assignments[:n_segments]
+        if initializing:
+            final_assignments = initial_assignments
+        else:
+            final_assignments = assignments[n_segments:]
+
+        initial_binning = self.initial_binning
+        final_binning = self.final_binning
+        flux_matrix = self.flux_matrix
+        transition_matrix = self.transition_matrix
+        for segment, iidx, fidx in zip(segments, initial_assignments, final_assignments):
+            initial_binning[iidx].add(segment)
+            final_binning[fidx].add(segment)
+            flux_matrix[iidx, fidx] += segment.weight
+            transition_matrix[iidx, fidx] += 1
+
+        n_recycled_total = self.n_recycled_segs
+        n_new_states = n_recycled_total - len(self.avail_initial_states)
+
+        log.debug(
+            '{} walkers scheduled for recycling, {} initial states available'.format(
+                n_recycled_total, len(self.avail_initial_states)
+            )
+        )
+
+        if n_new_states > 0:
+            return n_new_states
+        else:
+            return 0
+
+    def _process_args(self):
+        float_class = ['split_weight_limit', 'merge_weight_limit']
+        int_class = ['update_interval', 'lag_iterations', 'lof_n_neighbors', 
+                     'lof_iteration_history', 'num_we_splits', 'num_trial_splits']
+                 
+        self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
+        self.cfg.update({'train_path': None, 'machine_learning_method': None})
+        for key in self.cfg:
+            if key in int_class:
+                setattr(self, key, int(self.cfg[key]))
+            elif key in float_class:
+                setattr(self, key, float(self.cfg[key]))
+            else:
+                setattr(self, key, self.cfg[key])
+
+        if 'map_location' not in self.cfg.keys():
+            self.map_location = 'cpu'
+
+        self.CVAESettings = westpa.rc.config.get(['mdlearn', 'cvae'], {})
+
+        if 'device' not in self.CVAESettings.keys():
+            self.CVAESettings.update({'device': 'cpu'})
+
+        if 'prefetch_factor' not in self.CVAESettings.keys():
+            self.CVAESettings.update({'prefetch_factor': None})
+
+
+    def load_synd_model(self):
+        from synd.core import load_model
+        import pickle
+
+        synd_args = westpa.rc.config.get(['west', 'synd'])
+        synd_model_path = expandvars(synd_args['synd_model'])
+        backmap_path = expandvars(synd_args['dmatrix_map'])
+
+        synd_model = load_model(synd_model_path)
+
+        with open(backmap_path, 'rb') as infile:
+            dmatrix_map = pickle.load(infile)
+
+        synd_model.add_backmapper(dmatrix_map.get, name='dmatrix')
+
+        return synd_model
+
+
+    def __init__(self, rc=None, system=None):
+        super().__init__(rc, system)
+        
+        self._process_args()
+
+        westpa.rc.pstatus(self.CVAESettings)
+
+        self.niter: int = 0
+        self.nsegs: int = 0
+        self.nframes: int = 0
+        self.cur_pcoords: npt.ArrayLike = []
+        self.rng = np.random.default_rng()
+        temp = np.asarray(list(product(range(self.num_we_splits+1), repeat=self.num_we_splits)), dtype=int)
+        self.split_possible = temp[np.sum(temp, axis=1) == self.num_we_splits]
+        self.split_total = sum(self.split_possible)
+        self.autoencoder = SymmetricConv2dVAETrainer(**self.CVAESettings)
+        self.autoencoder._load_checkpoint(expandvars(rc.config.get(['west','ddmd', 'checkpoint_model'])), map_location=self.map_location)
+
+        self.synd_model = self.load_synd_model()
+
+        self.segments = None
+
+        del temp
+
+        # Note: Several of the getter methods that return npt.ArrayLike
+        # objects use a [:, 1:] index trick to avoid the initial frame
+        # in westpa segments which corresponds to the last frame of the
+        # previous iterations segment which is helpful for rate-constant
+        # calculations, but not helpful for DeepDriveMD.
+
+    def get_ibstates_ref(self) -> npt.ArrayLike:
+        """Collect ibstates from information.
+
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, Natoms)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        back_coords = []
+        with data_manager.lock:
+            iter_group = data_manager.get_iter_group(i)
+            coords_raw = iter_group["auxdata/dmatrix"][:]
+
+        return back_coords
+
+    def get_prev_dcoords(self, iterations: int, upperbound: Optional[int] = None) -> npt.ArrayLike:
+        """Collect coordinates from previous iterations.
+
+        Parameters
+        ----------
+        iterations : int
+            Number of previous iterations to collect.
+
+        upperbound : Optional[int]
+            The upper bound range (exclusive) of which to get the past dcoords
+
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, Natoms)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        if upperbound is None:
+            upperbound = self.niter
+
+        back_coords = []
+        with data_manager.lock:
+            for i in range(upperbound - iterations, upperbound):
+                iter_group = data_manager.get_iter_group(i)
+                coords_raw = iter_group["auxdata/dmatrix"][:]
+                for seg in coords_raw[:, 1:]:
+                    back_coords.append(seg)
+
+        return back_coords
+
+    def get_restart_dcoords(self) -> npt.ArrayLike:
+        """Collect coordinates for restart from current iteration.
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, Natoms)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        back_coords = []
+        with data_manager.lock:
+            iter_group = data_manager.get_iter_group(self.niter)
+            coords_raw = iter_group["auxdata/dmatrix"][:]
+            for seg in coords_raw[:, 1:]:
+                back_coords.append(seg)
+
+        return back_coords
+
+    def get_dcoords(self, segments: Sequence[Segment]) -> npt.ArrayLike:
+        """Concatenate the coordinates frames from each segment."""
+        dcoords = np.array(list(seg.data["dmatrix"] for seg in segments))
+        return dcoords[:,1:]
+        #return rcoords.reshape(self.nsegs, self.nframes + 1, -1, 3)[:, 1:]
+        # return rcoords.reshape(self.nsegs, self.nframes, -1, 3)[:, 1:]
+
+    def _run_we(self):
+        '''Run recycle/split/merge. Do not call this function directly; instead, use
+        populate_initial(), rebin_current(), or construct_next().'''
+        self._recycle_walkers()
+
+        #westpa.rc.pstatus(self.bin_target_counts)
+        #westpa.rc.pflush()
+
+        # sanity check
+        self._check_pre()
+
+        # Regardless of current particle count, always split overweight particles and merge underweight particles
+        # Then and only then adjust for correct particle count
+        total_number_of_subgroups = 0
+        total_number_of_particles = 0
+
+        for ibin, bin in enumerate(self.next_iter_binning):
+            if len(bin) == 0:
+                continue
+
+            for e in bin:
+                self.niter = e.n_iter
+                break
+
+            # Splits the bin into subgroups as defined by the called function
+            target_count = self.bin_target_counts[ibin]
+            subgroups = self.subgroup_function(self, ibin, n_iter=self.niter, **self.subgroup_function_kwargs)
+            total_number_of_subgroups += len(subgroups)
+            # Clear the bin
+            segments = np.array(sorted(bin, key=operator.attrgetter('weight')), dtype=np.object_)
+            weights = np.array(list(map(operator.attrgetter('weight'), segments)))
+            ideal_weight = weights.sum() / target_count
+            bin.clear()
+            # Determines to see whether we have more sub bins than we have target walkers in a bin (or equal to), and then uses
+            # different logic to deal with those cases.  Should devolve to the Huber/Kim algorithm in the case of few subgroups.
+            if len(subgroups) >= target_count:
+                for i in subgroups:
+                    # Merges all members of set i.  Checks to see whether there are any to merge.
+                    if len(i) > 1:
+                        (segment, parent) = self._merge_walkers(
+                            list(i),
+                            np.add.accumulate(np.array(list(map(operator.attrgetter('weight'), i)))),
+                            i,
+                        )
+                        i.clear()
+                        i.add(segment)
+                    # Add all members of the set i to the bin.  This keeps the bins in sync for the adjustment step.
+                    bin.update(i)
+
+                if len(subgroups) > target_count:
+                    self._adjust_count(bin, subgroups, target_count)
+
+            if len(subgroups) < target_count:
+                for i in subgroups:
+                    self._split_by_weight(i, target_count, ideal_weight)
+                    self._merge_by_weight(i, target_count, ideal_weight)
+                    # Same logic here.
+                    bin.update(i)
+                if self.do_adjust_counts:
+                    # A modified adjustment routine is necessary to ensure we don't unnecessarily destroy trajectory pathways.
+                    self._adjust_count(bin, subgroups, target_count)
+            if self.do_thresholds:
+                for i in subgroups:
+                    self._split_by_threshold(bin, i)
+                    self._merge_by_threshold(bin, i)
+                for iseg in bin:
+                    if iseg.weight > self.largest_allowed_weight or iseg.weight < self.smallest_allowed_weight:
+                        log.warning(
+                            f'Unable to fulfill threshold conditions for {iseg}. The given threshold range is likely too small.'
+                        )
+            total_number_of_particles += len(bin)
+        log.debug('Total number of subgroups: {!r}'.format(total_number_of_subgroups))
+
+        self._check_post()
+
+        self.new_weights = self.new_weights or []
+
+        log.debug('used initial states: {!r}'.format(self.used_initial_states))
+        log.debug('available initial states: {!r}'.format(self.avail_initial_states))
 
 
 class LS_Cluster_Driver(WEDriver):
@@ -578,40 +915,6 @@ def plot_scatter(
             color="k",
         )
     plt.savefig(output_path)
-
-
-class ExperimentSettings(BaseSettings):
-    output_path: Path
-    """Output directory for the run."""
-    update_interval: int
-    """How often to update the model. Set to 0 for static."""
-    lag_iterations: int
-    """Number of lagging iterations to use for training data."""
-    lof_n_neighbors: int
-    """Number of neigbors to use for local outlier factor."""
-    lof_iteration_history: int
-    """Number of iterations to look back at for local outlier factor."""
-    num_we_splits: int
-    """Number of westpa splits to prioritize outliers with.
-    num_we_merges gets implicitly set to num_we_splits + 1."""
-    num_trial_splits: int
-    """The top number of outlier segments that will be further
-    filtered by some biophysical observable. Must satisify
-    num_trial_splits >= num_we_splits + 1 """
-    split_weight_limit: float
-    """Lower limit on walker weight. If all of the walkers in 
-    num_trial_splits are below the limit, split/merge is skipped
-    that iteration"""
-    merge_weight_limit: float
-    """Upper limit on walker weight. If all of the walkers in 
-    num_trial_splits exceed limit, split/merge is skipped
-    that iteration"""
-    # TODO: Add validator for this num_trial_splits condition
-    contact_cutoff: float = 8.0
-    """The Angstrom cutoff for contact map generation."""
-
-    # validators
-    _mkdir_output_path = mkdir_validator("output_path")
 
 
 class MachineLearningMethod:
