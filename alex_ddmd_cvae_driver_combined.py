@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 from westpa.core.segment import Segment
 from scipy.sparse import coo_matrix
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
-from random import sample
 
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.cluster import KMeans
@@ -25,6 +24,8 @@ import westpa
 from westpa.core.binning import Bin
 from westpa.core.we_driver import WEDriver
 from westpa.core.h5io import tostr
+
+from memory_profiler import profile 
 
 log = logging.getLogger(__name__)
 
@@ -279,6 +280,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
     ) -> Sequence[Segment]:
         return np.array(sorted(bin_, key=lambda x: x.seg_id), np.object_)
     
+    @profile
     def _run_we(self) -> None:
         """Run recycle/split/merge. Do not call this function directly; instead, use
         populate_initial(), rebin_current(), or construct_next()."""
@@ -295,7 +297,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
                 continue
             else:
                 self.niter = np.array([seg for seg in bin_])[0].n_iter -1 
-            
+
             # This checks for initializing; if niter is 0 then skip resampling
             if self.niter:
                 # This is an attempt to sort all of the segments consistently
@@ -580,9 +582,12 @@ class CustomDriver(DeepDriveMDDriver):
 
         return nof_per_segment
         
+    @profile
     def cluster_segments(self, z: np.ndarray) -> np.ndarray:
         # Load up to the last 50 of all the latent coordinates here
-        if self.niter > self.kmeans_iteration_history:
+        if self.niter == 1:
+            embedding_history = []
+        elif self.niter > self.kmeans_iteration_history:
             embedding_history = [
                 np.load(self.datasets_path / f"z-{p}.npy")
                 for p in range(self.niter - self.kmeans_iteration_history, self.niter)
@@ -594,9 +599,8 @@ class CustomDriver(DeepDriveMDDriver):
         embedding_history.append(z)
         embedding_history = np.concatenate(embedding_history)
         
+        print(f"{embedding_history.shape=}")
         # Perform the K-means clustering
-
-
         kmeans = KMeans(n_clusters=self.kmeans_clusters).fit(embedding_history)
         seg_labels = kmeans.labels_[-len(z):]
 
@@ -729,7 +733,8 @@ class CustomDriver(DeepDriveMDDriver):
                     self.plot_prev_data()
 
             self.machine_learning_method.train(all_coords)
-
+    
+    @profile
     def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
         # # Determine the location for the training data/model
         # if self.niter < self.update_interval:
