@@ -9,9 +9,9 @@ import pandas as pd
 from natsort import natsorted
 import matplotlib.pyplot as plt
 from westpa.core.segment import Segment
-from scipy.spatial import distance_matrix
 from scipy.sparse import coo_matrix
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
+from random import sample
 
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.cluster import KMeans
@@ -19,13 +19,12 @@ from itertools import product
 from os.path import expandvars
 
 import os
-from westpa_ddmd.driver import DeepDriveMDDriver
 from westpa_ddmd.config import BaseSettings, mkdir_validator
 
 import westpa
 from westpa.core.binning import Bin
-from westpa.core.segment import Segment
 from westpa.core.we_driver import WEDriver
+from westpa.core.h5io import tostr
 
 log = logging.getLogger(__name__)
 
@@ -39,8 +38,8 @@ SIM_ROOT_PATH = Path(__file__).parent
 class DeepDriveMDDriver(WEDriver, ABC):
     def _process_args(self):
         float_class = ['split_weight_limit', 'merge_weight_limit']
-        int_class = ['update_interval', 'lag_iterations', 'lof_n_neighbors', 
-                     'lof_iteration_history', 'num_we_splits', 'num_trial_splits']
+        int_class = ['update_interval', 'lag_iterations', 'kmeans_clsuters',
+                     'kmeans_iteration_history', 'num_we_splits', 'num_trial_splits']
                  
         self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
         self.cfg.update({'train_path': None, 'machine_learning_method': None})
@@ -87,23 +86,21 @@ class DeepDriveMDDriver(WEDriver, ABC):
         ...
 
     def _split_by_data(
-        self, bin: Bin, to_split: Sequence[Segment], split_into: int
+        self, bin: Bin, segments: Sequence[Segment], split_dict: dict
     ) -> None:
         
-        chosen_pick = self.split_possible[self.rng.integers(self.split_total)][0]
-        print(f'split choice: {chosen_pick}')
-        
-        for segments, split_into_custom  in zip(to_split, chosen_pick):
-            bin.remove(segments)
-            new_segments_list = self._split_walker(segments, split_into_custom+1, bin)
-            bin.update(new_segments_list)         
+        for ind in split_dict:
+            segment = segments[ind]
+            bin.remove(segment)
+            new_segments_list = self._split_walker(segment, split_dict[ind] + 1, bin)
+            bin.update(new_segments_list)
 
     def _merge_by_data(self, bin: Bin, to_merge: Sequence[Segment]) -> None:
         bin.difference_update(to_merge)
         new_segment, parent = self._merge_walkers(to_merge, None, bin)
         bin.add(new_segment)
 
-    def get_prev_dcoords(self, iterations: int) -> npt.ArrayLike:
+    def get_prev_dcoords(self, iterations: int, upperbound: Optional[int] = None) -> npt.ArrayLike:
         """Collect coordinates from previous iterations.
 
         Parameters
@@ -111,20 +108,27 @@ class DeepDriveMDDriver(WEDriver, ABC):
         iterations : int
             Number of previous iterations to collect.
 
+        upperbound : Optional[int]
+            The upper bound range (exclusive) of which to get the past dcoords
+
         Returns
         -------
         npt.ArrayLike
-            Coordinates with shape (N, Nsegments, Nframes, Natoms, 3)
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, Natoms)
         """
         # extract previous iteration data and add to curr_coords
         data_manager = westpa.rc.get_sim_manager().data_manager
 
         # TODO: If this function is slow, we can try direct h5 reads
 
+        if upperbound is None:
+            upperbound = self.niter
+
         back_coords = []
         with data_manager.lock:
-            for i in range(self.niter - iterations, self.niter+1):
+            for i in range(upperbound - iterations, upperbound):
                 iter_group = data_manager.get_iter_group(i)
+                #print(iter_group)
                 coords_raw = iter_group["auxdata/dmatrix"][:]
                 for seg in coords_raw[:, 1:]:
                     back_coords.append(seg)
@@ -259,11 +263,22 @@ class DeepDriveMDDriver(WEDriver, ABC):
             return np.array(list(seg.data[field] for seg in segments))[:, 1:]
         return np.array(list(seg.data for seg in segments))[:, 1:]
 
-    def _get_segments(
+    def _get_segments_by_weight(
         self, bin_: Union[Bin, Generator["Walker", None, None]]  # noqa
     ) -> Sequence[Segment]:
         return np.array(sorted(bin_, key=lambda x: x.weight), np.object_)
-
+        #return np.array([seg for seg in bin_])
+    
+    def _get_segments_by_parent_id(
+        self, bin_: Union[Bin, Generator["Walker", None, None]]  # noqa
+    ) -> Sequence[Segment]:
+        return np.array(sorted(bin_, key=lambda x: x.parent_id), np.object_)
+    
+    def _get_segments_by_seg_id(
+        self, bin_: Union[Bin, Generator["Walker", None, None]]  # noqa
+    ) -> Sequence[Segment]:
+        return np.array(sorted(bin_, key=lambda x: x.seg_id), np.object_)
+    
     def _run_we(self) -> None:
         """Run recycle/split/merge. Do not call this function directly; instead, use
         populate_initial(), rebin_current(), or construct_next()."""
@@ -275,51 +290,47 @@ class DeepDriveMDDriver(WEDriver, ABC):
         self._check_pre()
 
         # Resample
-        for bin_ in self.next_iter_binning:
+        for ibin, bin_ in enumerate(self.next_iter_binning):
             if len(bin_) == 0:
                 continue
-
-            # This will allow you to get the pcoords for all frames which is necessary for DDMD
-            # segments required for splitting and merging logic
-            segments = self._get_segments(bin_)
-            cur_segments = self._get_segments(self.current_iter_segments)
-            # print(cur_segments)
-            # print(cur_segments[0].data)
-            # print(self.get_rcoords(cur_segments))
-            # print(self.get_weights(cur_segments))
-            self.cur_pcoords = self.get_pcoords(cur_segments)
-
-            # TODO: Is there a way to get nsegs and nframes without pcoords?
-            # If so, we could save on a lookup. Can we retrive it from cur_segments?
-            self.niter = cur_segments[0].n_iter
-            self.nsegs = self.cur_pcoords.shape[0]
-            self.nframes = self.cur_pcoords.shape[1]
-
+            else:
+                self.niter = np.array([seg for seg in bin_])[0].n_iter -1 
+            
             # This checks for initializing; if niter is 0 then skip resampling
             if self.niter:
-                to_split_inds, merge_groups_inds = self.run(cur_segments)
-                #print(merge_groups_inds)
-                
-                if merge_groups_inds is not None:
-                    check = [len(i) for i in merge_groups_inds]
-                    
-                if to_split_inds is not None and merge_groups_inds is not None and np.max(check) <= self.num_we_splits +1 and np.min(check) > 0:
-                    to_split = np.array([segments[to_split_inds]])[0]
-
-                    # Split walker with largest scaled diff
-                    
-                    self._split_by_data(bin_, to_split, split_into=2)
-
-                    skip_merged = []
-                    for k_id, to_merge_inds in enumerate(merge_groups_inds):
-                        if len(to_merge_inds) > 1:
-                            to_merge = segments[to_merge_inds]
-                            self._merge_by_data(bin_, to_merge)
-                        else:
-                            skip_merged.append(k_id)
-                    print(f'skipped merging for kmeans clusters {skip_merged}')
+                # This is an attempt to sort all of the segments consistently
+                # If there is any recycling, we sort by the weight (less consistent)
+                # otherwise we are sorting by parent_id and seg_id (more consistent)
+                # The hope is that by the time there is recycling, the weights will be unique
+                recycle_check = np.array([seg.parent_id for seg in bin_])
+                if np.any(recycle_check < 0):
+                    segments = self._get_segments_by_weight(bin_)
+                    cur_segments = self._get_segments_by_weight(self.current_iter_segments)
                 else:
-                    print(f'skipped due to kmeans')
+                    segments = self._get_segments_by_parent_id(bin_)
+                    cur_segments = self._get_segments_by_seg_id(self.current_iter_segments)
+                
+                # print(segments)
+                # print(cur_segments)
+                self.cur_pcoords = self.get_pcoords(cur_segments)
+                
+                # TODO: Is there a way to get nsegs and nframes without pcoords?
+                # If so, we could save on a lookup. Can we retrive it from cur_segments?
+                self.niter = cur_segments[0].n_iter
+                self.nsegs = self.cur_pcoords.shape[0]
+                self.nframes = self.cur_pcoords.shape[1]          
+
+                to_split_dict, merge_groups_inds = self.run(cur_segments, segments)
+                
+                if to_split_dict is not None and merge_groups_inds is not None:
+                    
+                    self._split_by_data(bin_, segments, to_split_dict)
+
+                    for to_merge_inds in merge_groups_inds:
+                        to_merge = segments[to_merge_inds]
+                        self._merge_by_data(bin_, to_merge)
+                else:
+                    print('Too many walkers outside the weight thresholds!')
 
         # another sanity check
         self._check_post()
@@ -459,10 +470,11 @@ class MachineLearningMethod:
         """Takes aligned data and trains a new model on it. Outputs are saved in fixed postions."""
         # Load the base training data with the shape (frames, atoms, atoms)
         base_coords = np.load(self.base_training_data_path)
-
+        # print(f"{base_coords.shape=}")
+        
         # Concatenate the base training data with the new data (frames, atoms, atoms)
         coords = np.concatenate((base_coords, coords))
-
+        # print(f"{coords.shape=}")
         # Compute the contact maps
         contact_maps = self.compute_sparse_contact_map(coords)
         # print(contact_maps)
@@ -486,31 +498,51 @@ class MachineLearningMethod:
     def predict(self, coords: np.ndarray) -> np.ndarray:
         """Predict the latent space coordinates for a set of coordinate frames."""
         # Concatenate the coords from all the frames (frames, atoms, atoms)
-        coords = np.concatenate(coords)
+        # coords = np.concatenate(coords)
         #print(self.autoencoder.model)
         # Compute the contact maps
         contact_maps = self.compute_sparse_contact_map(coords)
         # Predict the latent space coordinates
         z, *_ = self.autoencoder.predict(
-            contact_maps, checkpoint=self.most_recent_checkpoint_path
+#            contact_maps, checkpoint=self.most_recent_checkpoint_path
+            contact_maps, checkpoint="checkpoint-epoch-25.pt"
+
         )
 
         return z
 
 
 class CustomDriver(DeepDriveMDDriver):
+    def load_synd_model(self):
+        from synd.core import load_model
+        import pickle
+
+        subgroup_args = westpa.rc.config.get(['west', 'drivers'])
+        synd_model_path = expandvars(subgroup_args['synd_model'])
+        backmap_path = expandvars(subgroup_args['dmatrix_map'])
+
+        synd_model = load_model(synd_model_path)
+
+        with open(backmap_path, 'rb') as infile:
+            dmatrix_map = pickle.load(infile)
+
+        synd_model.add_backmapper(dmatrix_map.get, name='dmatrix')
+
+        return synd_model
+
     def __init__(self, rc=None, system=None):
         super().__init__(rc, system)
 
         self._process_args()
 
-        self.base_training_data_path = expandvars(f'$WEST_SIM_ROOT/common_files/train.npy')
+        self.base_training_data_path = expandvars('$WEST_SIM_ROOT/common_files/train.npy')
 
         self.log_path = Path(f'{self.output_path}/westpa-ddmd-logs')
         os.makedirs(self.log_path, exist_ok=True)
         self.datasets_path = Path(f'{self.log_path}/datasets')
         os.makedirs(self.datasets_path, exist_ok=True)
-
+        self.synd_model = self.load_synd_model()
+        self.rng = np.random.default_rng()
         #self.base_training_data_path = SIM_ROOT_PATH / "common_files/train.npy"
         # self.cfg = ExperimentSettings.from_yaml(CONFIG_PATH)
         #self.log_path = self.cfg.output_path / "westpa-ddmd-logs"
@@ -547,6 +579,28 @@ class CustomDriver(DeepDriveMDDriver):
         nof_per_segment = nof[:, -1]
 
         return nof_per_segment
+        
+    def cluster_segments(self, z: np.ndarray) -> np.ndarray:
+        # Load up to the last 50 of all the latent coordinates here
+        if self.niter > self.kmeans_iteration_history:
+            embedding_history = [
+                np.load(self.datasets_path / f"z-{p}.npy")
+                for p in range(self.niter - self.kmeans_iteration_history, self.niter)
+            ]
+        else:
+            embedding_history = [np.load(p) for p in self.log_path.glob("z-*.npy")]
+
+        # Append the most recent frames to the end of the history
+        embedding_history.append(z)
+        embedding_history = np.concatenate(embedding_history)
+        
+        # Perform the K-means clustering
+
+
+        kmeans = KMeans(n_clusters=self.kmeans_clusters).fit(embedding_history)
+        seg_labels = kmeans.labels_[-len(z):]
+
+        return seg_labels
     
     def plot_prev_data(self):
         # Plot the old latent space projections of the training data and iteration data colored by phi
@@ -592,38 +646,102 @@ class CustomDriver(DeepDriveMDDriver):
         )
         return None
 
+    def get_prev_dcoords_training(self, segments, curr_dcoords, iters_back):
+
+        
+        # print('func')
+        # for seg in segments:
+        #     print(seg)
+        # Grab all the d-matrices from the last iteration (n_iter-1), will be in seg_id order by default.
+        # TODO: Hope we have some way to simplify this... WESTPA 3 function...
+        ibstate_group = westpa.rc.get_data_manager().we_h5file['ibstates/0']
+
+        if self.niter > 1:
+            past_dcoords = []
+            if iters_back == 0:
+                past_dcoords = []
+            elif self.niter <= iters_back:
+                iters_back = self.niter -1
+                past_dcoords = np.concatenate(self.get_prev_dcoords(iters_back, upperbound=self.niter))
+            else:
+                past_dcoords = np.concatenate(self.get_prev_dcoords(iters_back, upperbound=self.niter))
+
+            # Get current iter dcoords
+            # curr_dcoords = np.concatenate(self.get_prev_dcoords(1))
+            # print(curr_dcoords)
+        else:  # building the list from scratch, during first iter
+            past_dcoords, curr_dcoords = [], []
+            for segment in segments:
+                istate_id = ibstate_group['istate_index']['basis_state_id', int(segment.parent_id)]
+                #print(istate_id)
+                auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
+                #print(auxref)
+
+                dmatrix = self.synd_model.backmap([auxref], mapper='dmatrix')
+                curr_dcoords.append(dmatrix[0])
+                
+
+        chosen_dcoords = []
+        to_pop = []
+        for idx, segment in enumerate(segments):
+            #print(segment)
+            #print(seg.wtg_parent_ids)
+            if segment.parent_id < 0:
+                istate_id = ibstate_group['istate_index']['basis_state_id', -int(segment.parent_id + 1)]
+                #print(istate_id)
+                auxref = int(tostr(ibstate_group['bstate_index']['auxref', istate_id]))
+                #print(auxref)
+
+                dmatrix = self.synd_model.backmap([auxref], mapper='dmatrix')
+                chosen_dcoords.append(dmatrix[0])
+            else:
+                #print(idx)
+                #print(segment.parent_id)
+                chosen_dcoords.append(curr_dcoords[segment.parent_id])
+                to_pop.append(segment.parent_id)
+        
+        curr_dcoords = np.asarray(curr_dcoords)
+        if len(to_pop) > 0:
+            curr_dcoords = np.delete(curr_dcoords, to_pop, axis=0)
+        final = [np.asarray(i) for i in [chosen_dcoords, curr_dcoords, past_dcoords] if len(i) > 0]
+
+        print(len(chosen_dcoords))
+        print(f'curr_dcoords shape: {curr_dcoords.shape}')
+        print(len(past_dcoords))
+        # print(final)
+        # print(len(final))
+
+        print('yay')
+        if len(final) > 1:
+           print(f'{final[0].shape}, {final[1].shape}')
+
+        return np.vstack((final))
+
     def train_decider(self, all_coords: np.ndarray) -> None:
         if self.niter == 1 or self.niter % self.update_interval == 0:
             # Time to train a model
             if self.niter == 1:  # Training on first iteration data
                 print("Training an initial model...")
-                train_coords = np.concatenate(all_coords)
 
             else:  # Retraining time
-                print("Training a model on iteration " + str(self.niter) + "...")
+                print(f"Training a model on iteration {self.niter}...")
                 if self.niter > self.update_interval:
                     self.plot_prev_data()
-                if self.lag_iterations >= self.niter:
-                    train_coords = np.concatenate(self.get_prev_dcoords(self.niter - 1))
-                else:
-                    train_coords = np.concatenate(
-                        self.get_prev_dcoords(self.lag_iterations)
-                    )
 
-            self.machine_learning_method.train(train_coords)
+            self.machine_learning_method.train(all_coords)
 
-    def run(self, segments: Sequence[Segment]) -> None:
-        # Determine the location for the training data/model
-        if self.niter < self.update_interval:
-            self.train_path = self.log_path / f"ml-iter-1"
-        else:
-            self.train_path = (
-                self.log_path
-                / f"ml-iter-{self.niter - self.niter % self.update_interval}"
-            )
+    def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
+        # # Determine the location for the training data/model
+        # if self.niter < self.update_interval:
+        #     self.train_path = self.log_path / "ml-iter-1"
+        # else:
+        #     self.train_path = (
+        #         self.log_path
+        #         / f"ml-iter-{self.niter - self.niter % self.update_interval}"
+        #     )
 
         # Init the ML method
-        self.train_path.mkdir(exist_ok=True)
+        #self.train_path.mkdir(exist_ok=True)
         self.machine_learning_method = MachineLearningMethod(
             self.train_path, self.base_training_data_path
         )
@@ -631,97 +749,147 @@ class CustomDriver(DeepDriveMDDriver):
         # extract and format current iteration's data
         # additional audxata can be extracted in a similar manner
         try:
-            all_coords = self.get_dcoords(segments)
+            cur_dcoords = self.get_dcoords(cur_segments)
         except KeyError:
-            all_coords = self.get_restart_dcoords()
+            cur_dcoords = self.get_restart_dcoords()
 
-        # all_coords.shape=(segments, frames, atoms, xyz)
-        np.save(self.datasets_path / f"coords-{self.niter}.npy", all_coords)
+        # Concatenate all frames together
+        cur_dcoords = np.concatenate(cur_dcoords)
+        print(f"{cur_dcoords.shape=}")
 
-        # Train a new model if it's time
-        self.train_decider(all_coords)
+        all_dcoords = self.get_prev_dcoords_training(next_segments, cur_dcoords, 10)
+        print(f"{all_dcoords.shape=}")
+        cur_dcoords = all_dcoords[:self.nsegs]
+        print(f"{cur_dcoords.shape=}")
+
+        np.save(self.datasets_path / f"dcoords-{self.niter}.npy", all_dcoords)
+        
+        # # Train a new model if it's time
+        # self.train_decider(all_dcoords)
 
         # Regardless of training, predict
-        z = self.machine_learning_method.predict(all_coords)
-        nof_per_segment = self.lof_function(z)
+        z = self.machine_learning_method.predict(cur_dcoords)
+        print(f"{z.shape=}")
+
+        seg_labels = self.cluster_segments(z)
+        print('Clustered!')
         # Get data for sorting
-        
-        pcoord = np.concatenate(self.get_pcoords(segments)[:, -1])
+        pcoord = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
         try:
-            final_state = self.get_auxdata(segments, "state_indices")[:, -1]
+            final_state = self.get_auxdata(cur_segments, "state_indices")[:, -1]
         except KeyError:
             final_state = self.get_restart_auxdata("state_indices")[:, -1]
         
-        weight = self.get_weights(segments)[:]
+        weight = self.get_weights(cur_segments)[:]
         df = pd.DataFrame(
             {
-                "nof": nof_per_segment,
+                "kmeans_cluster": seg_labels,
                 "inds": np.arange(self.nsegs),
                 "pcoord": pcoord,
                 "cluster_id": final_state,
                 "weight": weight,
             }
-        ).sort_values("nof")    
+        )   
         print(df)
 
-        # Finally, sort the smallest lof scores by biophysical values
-        split_df = (  # Outliers
-            df.head(self.num_trial_splits)
-        )
-        removed_splits = split_df[split_df['weight'] <= self.split_weight_limit]
-        if len(removed_splits) > 1:
-            print("Removed these walkers from splitting")
-            print(removed_splits)
-                
-        # Filter out weights above the threshold 
-        split_df = split_df[split_df['weight'] > self.split_weight_limit]
-        if len(split_df) < self.num_we_splits:
-            print("Walkers up for splitting have weights that are too small. Skipping split/merge this iteration...")
-            to_split_inds = None
-        else:
-            split_df = (  # Outliers
-                split_df.sort_values("pcoord", ascending=True)
-                .head(self.num_we_splits)
-            )
-            # Collect the outlier segment indices
-            to_split_inds = split_df.inds.values
-            
-        # Take the inliers for merging, sorting them by
-        merge_df = (  # Inliers
-            df.tail(self.num_trial_splits)
-        )
+        # Check that the number of walkers is evenly divided by the number of clusters
+        assert self.nsegs % self.kmeans_clusters == 0 
+        # Ideal number of walkers per cluster
+        segs_per_cluster = int(self.nsegs / self.kmeans_clusters)
+        # Dictionary that maps the index of segments to the number of splits they need
+        split_dict = {}
+        # List that contains lists of indices of segments that will be merged together
+        merge_list =[]
+        for id in range(self.kmeans_clusters):
+            # Get just the walkers in this cluster
+            cluster_df = df[df['kmeans_cluster'] == id].sort_values('pcoord')
+            print(f"cluster_id: {id}")
+            print(cluster_df)
+            # Total number of walkers in the cluster
+            num_segs_in_cluster = len(cluster_df)
 
-        removed_merges = merge_df[merge_df['weight'] >= self.merge_weight_limit]
-        if len(removed_merges) > 1:
-            print("Removed these walkers from merging")
-            print(removed_merges)
+            if len(cluster_df) == segs_per_cluster: # correct number of walkers
+                continue
+            elif len(cluster_df) < segs_per_cluster: # need to split some walkers
+                # Display walkers under the weight threshold
+                removed_splits = cluster_df[cluster_df['weight'] <= self.split_weight_limit]
+                if len(removed_splits) > 1:
+                    print("Removed these walkers from splitting")
+                    print(removed_splits)
+                        
+                # Filter out weights above the threshold 
+                cluster_df = cluster_df[cluster_df['weight'] > self.split_weight_limit]
+                # The number of walkers that have sufficient weight for splitting
+                num_segs_for_splitting = len(cluster_df)
+                # Test if there are enough walkers with sufficient weight to split
+                if num_segs_for_splitting == 0:
+                    print("Walkers up for splitting have weights that are too small. Skipping split/merge this iteration...")
+                    split_dict = None
+                    break
+                else: # Splitting can happen!
+                    # Number of splits needed to bring the cluster up to the set number of walkers per cluster
+                    num_splits_needed = segs_per_cluster - num_segs_in_cluster
+                    print(f"{num_splits_needed=}")
+                    # Jeremy's magical math
+                    # split_possible is an array of possible ways to break up the x splits needed over y walkers
+                    temp = np.asarray(list(product(range(num_splits_needed+1), repeat=num_segs_for_splitting)), dtype=int)
+                    split_possible = temp[np.sum(temp, axis=1) == num_splits_needed]
+                    # This is the chosen split motif for this cluster
+                    chosen_splits = split_possible[self.rng.integers(len(split_possible))]
+                    print(f'split choice: {chosen_splits}')
+                    cluster_df = cluster_df.assign(splits=chosen_splits)
 
-        merge_df = merge_df[merge_df['weight'] < self.merge_weight_limit]
-        if len(merge_df) < 2 * self.num_we_splits:
-            print("Walkers up for merging have weights that are too large. Skipping split/merge this iteration...")
-            merge_list = None
-        else:
-            merge_df = (
-                merge_df.sort_values("pcoord", ascending=True)
-                .tail(2 * self.num_we_splits)
-            )
+                    # Add to the split_dict with each key corresponding to the index of the walker 
+                    # and the value being the number of splits
+                    for _, row in cluster_df.iterrows():
+                        if row['splits'] > 0:
+                            split_dict[int(row['inds'])] = int(row['splits'])
 
-            kmeans = KMeans(n_clusters=self.num_we_splits)
-            kmeans.fit(np.array(merge_df['pcoord']).reshape(-1, 1))
-            merge_df['cluster'] = kmeans.labels_
+                    print(f"{split_dict=}")
 
-            merge_list = []
-            for n in range(self.num_we_splits):
-                cluster_df = merge_df[merge_df['cluster'] == n]
-                #if len(cluster_df) > 1:
-                merge_list.append(cluster_df.inds.values)
+            else: # need to merge some walkers
+                # Find the walkers with too much weight
+                removed_merges = cluster_df[cluster_df['weight'] >= self.merge_weight_limit]
+                if len(removed_merges) > 1:
+                    print("Removed these walkers from merging")
+                    print(removed_merges)
 
+                # Filter out the walkers with too much weight
+                cluster_df = cluster_df[cluster_df['weight'] < self.merge_weight_limit]
+                num_segs_for_merging = len(cluster_df)
+                # Need a minimum number of walkers for merging
+                if num_segs_for_merging < num_segs_in_cluster - segs_per_cluster + 1:
+                    print("Walkers up for merging have weights that are too large. Skipping split/merge this iteration...")
+                    merge_list = None
+                    break
+                else: # Merging gets to happen!
+                    # Number of splits needed to bring the cluster up to the set number of walkers per cluster
+                    num_merges_needed = num_segs_in_cluster - segs_per_cluster
+                    print(f"{num_merges_needed=}")
+                    # Jeremy's magical math
+                    # split_possible is an array of possible ways to break up the x splits needed over y walkers
+                    temp = np.asarray(list(product(range(num_merges_needed+1), repeat=segs_per_cluster)), dtype=int)
+                    temp2 = np.array(temp)
+                    temp2[temp2!=0] += 1
+                    merges_possible = temp2[(np.sum(temp, axis=1) == num_merges_needed) & (np.sum(temp2, axis=1) <= num_segs_for_merging)]
+                    print(f"{merges_possible=}")
+
+                    # This is the chosen merge motif for this cluster
+                    chosen_merge = merges_possible[self.rng.integers(len(merges_possible))]
+                    chosen_merge = [i for i in chosen_merge if i != 0]
+                    print(f'merge choice: {chosen_merge}')
+                    for n in chosen_merge:
+                        rows = cluster_df.sample(n, random_state=self.rng)
+                        merge_group = list(rows.inds.values)
+                        # Append the merge to the lsit of all merges
+                        merge_list.append(merge_group)
+                        print(f"{merge_group=}")
+                        # Remove the sampled rows
+                        cluster_df = cluster_df.drop(rows.index)
+                    print(f"{merge_list=}")
 
         # Log dataframes
-        print(f"\n{split_df}\n{merge_df}")
         df.to_csv(self.datasets_path / f"full-niter-{self.niter}.csv")
-        split_df.to_csv(self.datasets_path / f"split-niter-{self.niter}.csv")
-        merge_df.to_csv(self.datasets_path / f"merge-niter-{self.niter}.csv")
 
         # Log the machine learning outputs
         np.save(self.datasets_path / f"z-{self.niter}.npy", z)
@@ -733,5 +901,5 @@ class CustomDriver(DeepDriveMDDriver):
         )
         np.save(self.datasets_path / f"pcoord-{self.niter}.npy", pcoord)
 
-        return to_split_inds, merge_list
+        return split_dict, merge_list
 
