@@ -25,7 +25,6 @@ from westpa.core.binning import Bin
 from westpa.core.we_driver import WEDriver
 from westpa.core.h5io import tostr
 
-from memory_profiler import profile 
 
 log = logging.getLogger(__name__)
 
@@ -280,7 +279,6 @@ class DeepDriveMDDriver(WEDriver, ABC):
     ) -> Sequence[Segment]:
         return np.array(sorted(bin_, key=lambda x: x.seg_id), np.object_)
     
-    @profile
     def _run_we(self) -> None:
         """Run recycle/split/merge. Do not call this function directly; instead, use
         populate_initial(), rebin_current(), or construct_next()."""
@@ -581,8 +579,17 @@ class CustomDriver(DeepDriveMDDriver):
         nof_per_segment = nof[:, -1]
 
         return nof_per_segment
-        
-    @profile
+
+    def find_combinations(self, target, current_combination, start, combo_list):
+        if target == 0:
+            combo_list.append(np.array(current_combination) + 1)
+            return
+        if target < 0:
+            return
+
+        for i in range(start, target + 1):
+            self.find_combinations(target - i, current_combination + [i], i, combo_list)
+
     def cluster_segments(self, z: np.ndarray) -> np.ndarray:
         # Load up to the last 50 of all the latent coordinates here
         if self.niter == 1:
@@ -734,7 +741,6 @@ class CustomDriver(DeepDriveMDDriver):
 
             self.machine_learning_method.train(all_coords)
     
-    @profile
     def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
         # # Determine the location for the training data/model
         # if self.niter < self.update_interval:
@@ -812,8 +818,9 @@ class CustomDriver(DeepDriveMDDriver):
             print(cluster_df)
             # Total number of walkers in the cluster
             num_segs_in_cluster = len(cluster_df)
-
+            print(f"{num_segs_in_cluster=}")
             if len(cluster_df) == segs_per_cluster: # correct number of walkers
+                print("Already the correct number of walkers!")
                 continue
             elif len(cluster_df) < segs_per_cluster: # need to split some walkers
                 # Display walkers under the weight threshold
@@ -871,17 +878,26 @@ class CustomDriver(DeepDriveMDDriver):
                     # Number of splits needed to bring the cluster up to the set number of walkers per cluster
                     num_merges_needed = num_segs_in_cluster - segs_per_cluster
                     print(f"{num_merges_needed=}")
-                    # Jeremy's magical math
-                    # split_possible is an array of possible ways to break up the x splits needed over y walkers
-                    temp = np.asarray(list(product(range(num_merges_needed+1), repeat=segs_per_cluster)), dtype=int)
-                    temp2 = np.array(temp)
-                    temp2[temp2!=0] += 1
-                    merges_possible = temp2[(np.sum(temp, axis=1) == num_merges_needed) & (np.sum(temp2, axis=1) <= num_segs_for_merging)]
+
+                    combos = []
+                    self.find_combinations(num_merges_needed, [], 1, combos)
+                    # print(f"{combos=}")
+                    # print(f"{len(combos)=}")
+                    merges_possible = []
+                    for ind, x in enumerate(combos):
+                        if np.sum(x) <= num_segs_for_merging:
+                            merges_possible.append(x)
+                    del combos
+                    # # Jeremy's magical math
+                    # # split_possible is an array of possible ways to break up the x splits needed over y walkers
+                    # temp = np.asarray(list(product(range(num_merges_needed+1), repeat=segs_per_cluster)), dtype=int)
+                    # temp2 = np.array(temp)
+                    # temp2[temp2!=0] += 1
+                    # merges_possible = temp2[(np.sum(temp, axis=1) == num_merges_needed) & (np.sum(temp2, axis=1) <= num_segs_for_merging)]
                     print(f"{merges_possible=}")
 
                     # This is the chosen merge motif for this cluster
-                    chosen_merge = merges_possible[self.rng.integers(len(merges_possible))]
-                    chosen_merge = [i for i in chosen_merge if i != 0]
+                    chosen_merge = list(merges_possible[self.rng.integers(len(merges_possible))])
                     print(f'merge choice: {chosen_merge}')
                     for n in chosen_merge:
                         rows = cluster_df.sample(n, random_state=self.rng)
