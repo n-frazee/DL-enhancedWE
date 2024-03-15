@@ -535,8 +535,8 @@ class MachineLearningMethod:
         contact_maps = self.compute_sparse_contact_map(coords)
         # Predict the latent space coordinates
         z, *_ = self.autoencoder.predict(
-#            contact_maps, checkpoint=self.most_recent_checkpoint_path
-            contact_maps, checkpoint="checkpoint-epoch-25.pt"
+            contact_maps, checkpoint=self.most_recent_checkpoint_path
+            #contact_maps, checkpoint="checkpoint-epoch-25.pt"
 
         )
 
