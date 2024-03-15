@@ -785,7 +785,7 @@ class CustomDriver(DeepDriveMDDriver):
 
             else:  # Retraining time
                 print(f"Training a model on iteration {self.niter}...")
-                if self.niter > self.update_interval:
+                if self.niter > 2 * self.update_interval:
                     self.plot_prev_data()
 
             self.machine_learning_method.train(all_coords)
