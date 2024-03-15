@@ -791,17 +791,17 @@ class CustomDriver(DeepDriveMDDriver):
             self.machine_learning_method.train(all_coords)
     
     def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
-        # # Determine the location for the training data/model
-        # if self.niter < self.update_interval:
-        #     self.train_path = self.log_path / "ml-iter-1"
-        # else:
-        #     self.train_path = (
-        #         self.log_path
-        #         / f"ml-iter-{self.niter - self.niter % self.update_interval}"
-        #     )
+        # Determine the location for the training data/model
+        if self.niter < self.update_interval:
+            self.train_path = self.log_path / "ml-iter-1"
+        else:
+            self.train_path = (
+                self.log_path
+                / f"ml-iter-{self.niter - self.niter % self.update_interval}"
+            )
 
         # Init the ML method
-        #self.train_path.mkdir(exist_ok=True)
+        self.train_path.mkdir(exist_ok=True)
         self.machine_learning_method = MachineLearningMethod(
             self.train_path, self.base_training_data_path
         )
@@ -825,7 +825,7 @@ class CustomDriver(DeepDriveMDDriver):
         np.save(self.datasets_path / f"dcoords-{self.niter}.npy", all_dcoords)
         
         # # Train a new model if it's time
-        # self.train_decider(all_dcoords)
+        self.train_decider(all_dcoords)
 
         # Regardless of training, predict
         z = self.machine_learning_method.predict(cur_dcoords)
