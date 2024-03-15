@@ -25,5 +25,5 @@ mkdir   seg_logs traj_segs istates
 
 w_init --bstate-file "ntl9_folding_synd/bstates.txt" \
         --tstate 'folded,0.5' \
-	--segs-per-state 2 \
+	--segs-per-state 1 \
 	--work-manager=threads "$@" > init.log
