@@ -902,7 +902,7 @@ class CustomDriver(DeepDriveMDDriver):
                         split_possible = []
                         for ind, x in enumerate(combos):
                             if len(x) <= num_segs_for_splitting:
-                                split_possible.append(x + 1)
+                                split_possible.append(x)
                         # This is the chosen split motif for this cluster
                         chosen_splits = sorted(split_possible[self.rng.integers(len(split_possible))], reverse=True)
                         print(f'split choice: {chosen_splits}')
