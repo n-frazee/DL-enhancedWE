@@ -434,7 +434,7 @@ class CVAESettings(BaseSettings):
     num_data_workers: int = 0
     prefetch_factor: Optional[int] = None
     batch_size: int = 64
-    device: str = "gpu"
+    device: str = "cuda"
     optimizer_name: str = "RMSprop"
     optimizer_hparams: Dict[str, Any] = {"lr": 0.001, "weight_decay": 0.00001}
     epochs: int = 100
