@@ -950,18 +950,20 @@ class CustomDriver(DeepDriveMDDriver):
                             cluster_df = cluster_df.drop(rows.index)
                         print(f"{merge_list=}")
 
-        # Log dataframes
-        df.to_csv(self.datasets_path / f"full-niter-{self.niter}.csv")
+        if self.ml_mode != "ablation":
 
-        # Log the machine learning outputs
-        np.save(self.datasets_path / f"z-{self.niter}.npy", z)
+            # Log dataframes
+            df.to_csv(self.datasets_path / f"full-niter-{self.niter}.csv")
 
-        # Save data for plotting
-        np.save(
-            self.datasets_path / f"last-z-{self.niter}.npy",
-            np.reshape(z, (self.nsegs, self.nframes, -1))[:, -1, :],
-        )
-        np.save(self.datasets_path / f"pcoord-{self.niter}.npy", pcoord)
+            # Log the machine learning outputs
+            np.save(self.datasets_path / f"z-{self.niter}.npy", z)
+
+            # Save data for plotting
+            np.save(
+                self.datasets_path / f"last-z-{self.niter}.npy",
+                np.reshape(z, (self.nsegs, self.nframes, -1))[:, -1, :],
+            )
+            np.save(self.datasets_path / f"pcoord-{self.niter}.npy", pcoord)
 
         return split_dict, merge_list
 
