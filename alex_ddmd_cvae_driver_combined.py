@@ -889,7 +889,7 @@ class CustomDriver(DeepDriveMDDriver):
                         print(removed_splits)
                             
                     # Filter out weights above the threshold 
-                    cluster_df = cluster_df[cluster_df['weight'] > self.split_weight_limit]
+                    cluster_df = cluster_df[cluster_df['weight'] > self.split_weight_limit].sort_values("pcoord")
                     # The number of walkers that have sufficient weight for splitting
                     num_segs_for_splitting = len(cluster_df)
                     # Test if there are enough walkers with sufficient weight to split
@@ -906,7 +906,7 @@ class CustomDriver(DeepDriveMDDriver):
                         # This is the chosen split motif for this cluster
                         chosen_splits = sorted(split_possible[self.rng.integers(len(split_possible))], reverse=True)
                         print(f'split choice: {chosen_splits}')
-                        sorted_segs = cluster_df.sort_values("pcoord").inds.values
+                        sorted_segs = cluster_df.inds.values
                         print(f"{sorted_segs=}")
 
                         # Add to the split_dict with each key corresponding to the index of the walker 
@@ -924,7 +924,7 @@ class CustomDriver(DeepDriveMDDriver):
                         print(removed_merges)
 
                     # Filter out the walkers with too much weight
-                    cluster_df = cluster_df[cluster_df['weight'] < self.merge_weight_limit]
+                    cluster_df = cluster_df[cluster_df['weight'] < self.merge_weight_limit].sort_values('pcoord')
                     num_segs_for_merging = len(cluster_df)
                     # Need a minimum number of walkers for merging
                     if num_segs_for_merging < num_segs_in_cluster - segs_per_cluster + 1:
@@ -943,9 +943,7 @@ class CustomDriver(DeepDriveMDDriver):
                         # This is the chosen merge motif for this cluster
                         chosen_merge = sorted(list(merges_possible[self.rng.integers(len(merges_possible))]), reverse=True)
                         print(f'merge choice: {chosen_merge}')
-
-                        cluster_df.sort_values('pcoord')
-                        print(f"{cluster_df=}")
+                        #print(f"{cluster_df=}")
                         for n in chosen_merge:
                             rows = cluster_df.tail(n)
                             merge_group = list(rows.inds.values)
