@@ -519,7 +519,7 @@ class MachineLearningMethod:
         )
         np.save(self.train_path / "z.npy", z[len(base_coords):])
 
-    def predict(self, coords: np.ndarray) -> np.ndarray:
+    def predict(self, coords: np.ndarray, static_chk_path=None) -> np.ndarray:
         """Predict the latent space coordinates for a set of coordinate frames."""
         # Concatenate the coords from all the frames (frames, atoms, atoms)
         # coords = np.concatenate(coords)
@@ -527,9 +527,9 @@ class MachineLearningMethod:
         # Compute the contact maps
         contact_maps = self.compute_sparse_contact_map(coords)
         # Predict the latent space coordinates
-        if self.ml_mode == 'static':
+        if static_chk_path is None:
             z, *_ = self.autoencoder.predict(
-                contact_maps, checkpoint=self.static_chk_path
+                contact_maps, checkpoint=static_chk_path
             )
         else:
             z, *_ = self.autoencoder.predict(
@@ -827,9 +827,12 @@ class CustomDriver(DeepDriveMDDriver):
             if self.ml_mode == 'train':
                 # Train a new model if it's time
                 self.train_decider(all_dcoords)
-
-            # Regardless of training, predict
-            z = self.machine_learning_method.predict(cur_dcoords)
+                # Regardless of training, predict
+                z = self.machine_learning_method.predict(cur_dcoords)
+            else:
+                # Regardless of training, predict
+                z = self.machine_learning_method.predict(cur_dcoords, self.static_chk_path)
+            
             #print(f"{z.shape=}")
             seg_labels = self.cluster_segments(z, pcoord)
         else:
