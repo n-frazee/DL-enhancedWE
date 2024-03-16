@@ -527,7 +527,7 @@ class MachineLearningMethod:
         # Compute the contact maps
         contact_maps = self.compute_sparse_contact_map(coords)
         # Predict the latent space coordinates
-        if static_chk_path is None:
+        if static_chk_path is not None:
             z, *_ = self.autoencoder.predict(
                 contact_maps, checkpoint=static_chk_path
             )
