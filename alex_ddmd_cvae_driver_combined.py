@@ -825,6 +825,7 @@ class CustomDriver(DeepDriveMDDriver):
             np.save(self.datasets_path / f"dcoords-{self.niter}.npy", all_dcoords)
             
             if self.ml_mode == 'train':
+                print("Train")
                 # Train a new model if it's time
                 self.train_decider(all_dcoords)
                 # Regardless of training, predict
@@ -836,6 +837,7 @@ class CustomDriver(DeepDriveMDDriver):
             #print(f"{z.shape=}")
             seg_labels = self.cluster_segments(z, pcoord)
         else:
+            print("Ablation")
             seg_labels = [self.rng.integers(self.kmeans_clusters) for _ in range(self.nsegs)]
 
         df = pd.DataFrame(
