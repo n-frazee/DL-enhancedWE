@@ -40,10 +40,11 @@ class DeepDriveMDDriver(WEDriver, ABC):
     def _process_args(self):
         float_class = ['split_weight_limit', 'merge_weight_limit']
         int_class = ['update_interval', 'lag_iterations', 'kmeans_clsuters',
-                     'kmeans_iteration_history', 'num_we_splits', 'num_trial_splits']
+                     'kmeans_iteration_history']
                  
         self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
-        self.cfg.update({'train_path': None, 'machine_learning_method': None})
+        self.cfg.update({'train_path': None, 'machine_learning_method': None, 
+                         'static_chk_path': None, 'ml_mode': None})
         for key in self.cfg:
             if key in int_class:
                 setattr(self, key, int(self.cfg[key]))
@@ -62,10 +63,6 @@ class DeepDriveMDDriver(WEDriver, ABC):
         self.nframes: int = 0
         self.cur_pcoords: npt.ArrayLike = []
         self.rng = np.random.default_rng()
-        temp = np.asarray(list(product(range(self.num_we_splits+1), repeat=self.num_we_splits)), dtype=int)
-        self.split_possible = temp[np.sum(temp, axis=1) == self.num_we_splits]
-        self.split_total = sum(self.split_possible)
-        del temp
 
         # Note: Several of the getter methods that return npt.ArrayLike
         # objects use a [:, 1:] index trick to avoid the initial frame
@@ -89,7 +86,6 @@ class DeepDriveMDDriver(WEDriver, ABC):
     def _split_by_data(
         self, bin: Bin, segments: Sequence[Segment], split_dict: dict
     ) -> None:
-        
         for ind in split_dict:
             segment = segments[ind]
             bin.remove(segment)
@@ -404,13 +400,10 @@ class ExperimentSettings(BaseSettings):
     """Number of neigbors to use for local outlier factor."""
     lof_iteration_history: int
     """Number of iterations to look back at for local outlier factor."""
-    num_we_splits: int
-    """Number of westpa splits to prioritize outliers with.
-    num_we_merges gets implicitly set to num_we_splits + 1."""
-    num_trial_splits: int
-    """The top number of outlier segments that will be further
-    filtered by some biophysical observable. Must satisify
-    num_trial_splits >= num_we_splits + 1 """
+    ml_mode: str
+    """static, ablation, train"""
+    static_chk_path: Path
+    """checkpoint file for static"""
     split_weight_limit: float
     """Lower limit on walker weight. If all of the walkers in 
     num_trial_splits are below the limit, split/merge is skipped
@@ -441,7 +434,7 @@ class CVAESettings(BaseSettings):
     num_data_workers: int = 0
     prefetch_factor: Optional[int] = None
     batch_size: int = 64
-    device: str = "cpu"
+    device: str = "gpu"
     optimizer_name: str = "RMSprop"
     optimizer_hparams: Dict[str, Any] = {"lr": 0.001, "weight_decay": 0.00001}
     epochs: int = 100
@@ -466,7 +459,7 @@ class MachineLearningMethod:
         self.base_training_data_path = base_training_data_path
 
         # Load the configuration
-        self.cfg = ExperimentSettings.from_yaml(CONFIG_PATH)
+        #self.cfg = ExperimentSettings.from_yaml(CONFIG_PATH)
 
         # Initialize the model
         self.autoencoder = SymmetricConv2dVAETrainer(**CVAESettings().dict())
@@ -534,11 +527,14 @@ class MachineLearningMethod:
         # Compute the contact maps
         contact_maps = self.compute_sparse_contact_map(coords)
         # Predict the latent space coordinates
-        z, *_ = self.autoencoder.predict(
-            #contact_maps, checkpoint=self.most_recent_checkpoint_path
-            contact_maps, checkpoint="checkpoint-epoch-25.pt"
-
-        )
+        if self.ml_mode == 'static':
+            z, *_ = self.autoencoder.predict(
+                contact_maps, checkpoint=self.static_chk_path
+            )
+        else:
+            z, *_ = self.autoencoder.predict(
+                contact_maps, checkpoint=self.most_recent_checkpoint_path
+            )  
 
         return z
 
@@ -573,14 +569,6 @@ class CustomDriver(DeepDriveMDDriver):
         os.makedirs(self.datasets_path, exist_ok=True)
         self.synd_model = self.load_synd_model()
         self.rng = np.random.default_rng()
-        #self.base_training_data_path = SIM_ROOT_PATH / "common_files/train.npy"
-        # self.cfg = ExperimentSettings.from_yaml(CONFIG_PATH)
-        #self.log_path = self.cfg.output_path / "westpa-ddmd-logs"
-        #self.log_path.mkdir(exist_ok=True)
-        #self.machine_learning_method = None
-        #self.train_path = None
-        #self.datasets_path = self.log_path / "datasets"
-        #self.datasets_path.mkdir(exist_ok=True)
 
     def lof_function(self, z: np.ndarray) -> np.ndarray:
         # Load up to the last 50 of all the latent coordinates here
@@ -790,50 +778,10 @@ class CustomDriver(DeepDriveMDDriver):
             self.machine_learning_method.train(all_coords)
     
     def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
-        # # Determine the location for the training data/model
-        # if self.niter < self.update_interval:
-        #     self.train_path = self.log_path / "ml-iter-1"
-        # else:
-        #     self.train_path = (
-        #         self.log_path
-        #         / f"ml-iter-{self.niter - self.niter % self.update_interval}"
-        #     )
 
-        # Init the ML method
-        # self.train_path.mkdir(exist_ok=True)
-        self.machine_learning_method = MachineLearningMethod(
-            self.train_path, self.base_training_data_path
-        )
 
-        # extract and format current iteration's data
-        # additional audxata can be extracted in a similar manner
-        try:
-            cur_dcoords = self.get_dcoords(cur_segments)
-        except KeyError:
-            cur_dcoords = self.get_restart_dcoords()
-
-        # Concatenate all frames together
-        cur_dcoords = np.concatenate(cur_dcoords)
-        #print(f"{cur_dcoords.shape=}")
-
-        all_dcoords = self.get_prev_dcoords_training(next_segments, cur_dcoords, 10)
-        #print(f"{all_dcoords.shape=}")
-        cur_dcoords = all_dcoords[:self.nsegs]
-        #print(f"{cur_dcoords.shape=}")
-
-        np.save(self.datasets_path / f"dcoords-{self.niter}.npy", all_dcoords)
-        
-        # Train a new model if it's time
-        # self.train_decider(all_dcoords)
-
-        # Regardless of training, predict
-        z = self.machine_learning_method.predict(cur_dcoords)
-        #print(f"{z.shape=}")
-
-        pcoord = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
-        seg_labels = self.cluster_segments(z, pcoord)
-        print('Clustered!')
         # Get data for sorting
+        pcoord = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
         try:
             final_state = self.get_auxdata(cur_segments, "state_indices")[:, -1]
         except KeyError:
@@ -841,6 +789,51 @@ class CustomDriver(DeepDriveMDDriver):
         
         weight = self.get_weights(cur_segments)[:]
 
+        if self.ml_mode != 'ablation':
+            if self.ml_mode == 'train':
+                # Determine the location for the training data/model
+                if self.niter < self.update_interval:
+                    self.train_path = self.log_path / "ml-iter-1"
+                else:
+                    self.train_path = (
+                        self.log_path
+                        / f"ml-iter-{self.niter - self.niter % self.update_interval}"
+                    )
+
+            # Init the ML method
+            # self.train_path.mkdir(exist_ok=True)
+            self.machine_learning_method = MachineLearningMethod(
+                self.train_path, self.base_training_data_path
+            )
+
+            # extract and format current iteration's data
+            # additional audxata can be extracted in a similar manner
+            try:
+                cur_dcoords = self.get_dcoords(cur_segments)
+            except KeyError:
+                cur_dcoords = self.get_restart_dcoords()
+
+            # Concatenate all frames together
+            cur_dcoords = np.concatenate(cur_dcoords)
+            #print(f"{cur_dcoords.shape=}")
+
+            all_dcoords = self.get_prev_dcoords_training(next_segments, cur_dcoords, 10)
+            #print(f"{all_dcoords.shape=}")
+            cur_dcoords = all_dcoords[:self.nsegs]
+            #print(f"{cur_dcoords.shape=}")
+
+            np.save(self.datasets_path / f"dcoords-{self.niter}.npy", all_dcoords)
+            
+            if self.ml_mode == 'train':
+                # Train a new model if it's time
+                self.train_decider(all_dcoords)
+
+            # Regardless of training, predict
+            z = self.machine_learning_method.predict(cur_dcoords)
+            #print(f"{z.shape=}")
+            seg_labels = self.cluster_segments(z, pcoord)
+        else:
+            seg_labels = [self.rng.integers(self.kmeans_clusters) for _ in range(self.nsegs)]
 
         df = pd.DataFrame(
             {
