@@ -93,7 +93,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         for ind in split_dict:
             segment = segments[ind]
             bin.remove(segment)
-            new_segments_list = self._split_walker(segment, split_dict[ind] + 1, bin)
+            new_segments_list = self._split_walker(segment, split_dict[ind], bin)
             bin.update(new_segments_list)
 
     def _merge_by_data(self, bin: Bin, to_merge: Sequence[Segment]) -> None:
@@ -898,7 +898,11 @@ class CustomDriver(DeepDriveMDDriver):
                         split_dict = None
                         break
                     else: # Splitting can happen!
-                        split_possible = combos
+                        # Need to check there's enough walkers to use that particular merging scheme
+                        split_possible = []
+                        for ind, x in enumerate(combos):
+                            if len(x) <= num_segs_for_splitting:
+                                split_possible.append(x + 1)
                         # This is the chosen split motif for this cluster
                         chosen_splits = sorted(split_possible[self.rng.integers(len(split_possible))], reverse=True)
                         print(f'split choice: {chosen_splits}')
