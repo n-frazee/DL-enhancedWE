@@ -941,7 +941,7 @@ class CustomDriver(DeepDriveMDDriver):
                         print(f"{merges_possible=}")
 
                         # This is the chosen merge motif for this cluster
-                        chosen_merge = list(merges_possible[self.rng.integers(len(merges_possible))])
+                        chosen_merge = sorted(list(merges_possible[self.rng.integers(len(merges_possible))]), reverse=True)
                         print(f'merge choice: {chosen_merge}')
 
                         cluster_df.sort_values('pcoord')
