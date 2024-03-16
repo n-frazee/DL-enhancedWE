@@ -801,7 +801,7 @@ class CustomDriver(DeepDriveMDDriver):
                     )
 
             # Init the ML method
-            # self.train_path.mkdir(exist_ok=True)
+            self.train_path.mkdir(exist_ok=True)
             self.machine_learning_method = MachineLearningMethod(
                 self.train_path, self.base_training_data_path
             )
