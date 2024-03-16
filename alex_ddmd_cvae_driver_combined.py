@@ -441,7 +441,7 @@ class CVAESettings(BaseSettings):
     num_data_workers: int = 0
     prefetch_factor: Optional[int] = None
     batch_size: int = 64
-    device: str = "cuda"
+    device: str = "cpu"
     optimizer_name: str = "RMSprop"
     optimizer_hparams: Dict[str, Any] = {"lr": 0.001, "weight_decay": 0.00001}
     epochs: int = 100
@@ -535,13 +535,12 @@ class MachineLearningMethod:
         contact_maps = self.compute_sparse_contact_map(coords)
         # Predict the latent space coordinates
         z, *_ = self.autoencoder.predict(
-            contact_maps, checkpoint=self.most_recent_checkpoint_path
-            #contact_maps, checkpoint="checkpoint-epoch-25.pt"
+            #contact_maps, checkpoint=self.most_recent_checkpoint_path
+            contact_maps, checkpoint="checkpoint-epoch-25.pt"
 
         )
 
         return z
-
 
 class CustomDriver(DeepDriveMDDriver):
     def load_synd_model(self):
@@ -613,7 +612,7 @@ class CustomDriver(DeepDriveMDDriver):
 
     def find_combinations(self, target, current_combination, start, combo_list):
         if target == 0:
-            combo_list.append(np.array(current_combination) + 1)
+            combo_list.append(np.array(current_combination))
             return
         if target < 0:
             return
@@ -791,17 +790,17 @@ class CustomDriver(DeepDriveMDDriver):
             self.machine_learning_method.train(all_coords)
     
     def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
-        # Determine the location for the training data/model
-        if self.niter < self.update_interval:
-            self.train_path = self.log_path / "ml-iter-1"
-        else:
-            self.train_path = (
-                self.log_path
-                / f"ml-iter-{self.niter - self.niter % self.update_interval}"
-            )
+        # # Determine the location for the training data/model
+        # if self.niter < self.update_interval:
+        #     self.train_path = self.log_path / "ml-iter-1"
+        # else:
+        #     self.train_path = (
+        #         self.log_path
+        #         / f"ml-iter-{self.niter - self.niter % self.update_interval}"
+        #     )
 
         # Init the ML method
-        self.train_path.mkdir(exist_ok=True)
+        # self.train_path.mkdir(exist_ok=True)
         self.machine_learning_method = MachineLearningMethod(
             self.train_path, self.base_training_data_path
         )
@@ -824,8 +823,8 @@ class CustomDriver(DeepDriveMDDriver):
 
         np.save(self.datasets_path / f"dcoords-{self.niter}.npy", all_dcoords)
         
-        # # Train a new model if it's time
-        self.train_decider(all_dcoords)
+        # Train a new model if it's time
+        # self.train_decider(all_dcoords)
 
         # Regardless of training, predict
         z = self.machine_learning_method.predict(cur_dcoords)
@@ -873,92 +872,85 @@ class CustomDriver(DeepDriveMDDriver):
             if len(cluster_df) == segs_per_cluster: # correct number of walkers
                 print("Already the correct number of walkers!")
                 continue
-            elif len(cluster_df) < segs_per_cluster: # need to split some walkers
-                # Display walkers under the weight threshold
-                removed_splits = cluster_df[cluster_df['weight'] <= self.split_weight_limit]
-                if len(removed_splits) > 1:
-                    print("Removed these walkers from splitting")
-                    print(removed_splits)
-                        
-                # Filter out weights above the threshold 
-                cluster_df = cluster_df[cluster_df['weight'] > self.split_weight_limit]
-                # The number of walkers that have sufficient weight for splitting
-                num_segs_for_splitting = len(cluster_df)
-                # Test if there are enough walkers with sufficient weight to split
-                if num_segs_for_splitting == 0:
-                    print(f"Walkers up for splitting have weights that are too small. Skipping split/merge on iteration {self.niter}...")
-                    split_dict = None
-                    break
-                else: # Splitting can happen!
-                    # Number of splits needed to bring the cluster up to the set number of walkers per cluster
-                    num_splits_needed = segs_per_cluster - num_segs_in_cluster
-                    print(f"{num_splits_needed=}")
-                    # Jeremy's magical math
-                    # split_possible is an array of possible ways to break up the x splits needed over y walkers
-                    temp = np.asarray(list(product(range(num_splits_needed+1), repeat=num_segs_for_splitting)), dtype=int)
-                    split_possible = temp[np.sum(temp, axis=1) == num_splits_needed]
-                    # This is the chosen split motif for this cluster
-                    chosen_splits = split_possible[self.rng.integers(len(split_possible))]
-                    print(f'split choice: {chosen_splits}')
-                    cluster_df = cluster_df.assign(splits=chosen_splits)
+            else:
+                # Number of resamples needed to bring the cluster to the set number of walkers per cluster
+                num_resamples_needed = abs(num_segs_in_cluster - segs_per_cluster)
+                print(f"{num_resamples_needed=}")
 
-                    # Add to the split_dict with each key corresponding to the index of the walker 
-                    # and the value being the number of splits
-                    for _, row in cluster_df.iterrows():
-                        if row['splits'] > 0:
-                            split_dict[int(row['inds'])] = int(row['splits'])
+                # All the possible combinations of numbers that sum up to the num_resamples_needed
+                combos = []
+                self.find_combinations(num_resamples_needed, [], 1, combos)
 
-                    print(f"{split_dict=}")
+                if len(cluster_df) < segs_per_cluster: # need to split some walkers
+                    # Display walkers under the weight threshold
+                    removed_splits = cluster_df[cluster_df['weight'] <= self.split_weight_limit]
+                    if len(removed_splits) > 1:
+                        print("Removed these walkers from splitting")
+                        print(removed_splits)
+                            
+                    # Filter out weights above the threshold 
+                    cluster_df = cluster_df[cluster_df['weight'] > self.split_weight_limit]
+                    # The number of walkers that have sufficient weight for splitting
+                    num_segs_for_splitting = len(cluster_df)
+                    # Test if there are enough walkers with sufficient weight to split
+                    if num_segs_for_splitting == 0:
+                        print(f"Walkers up for splitting have weights that are too small. Skipping split/merge on iteration {self.niter}...")
+                        split_dict = None
+                        break
+                    else: # Splitting can happen!
+                        split_possible = combos
+                        # This is the chosen split motif for this cluster
+                        chosen_splits = sorted(split_possible[self.rng.integers(len(split_possible))], reverse=True)
+                        print(f'split choice: {chosen_splits}')
+                        sorted_segs = cluster_df.sort_values("pcoord").inds.values
+                        print(f"{sorted_segs=}")
 
-            else: # need to merge some walkers
-                # Find the walkers with too much weight
-                removed_merges = cluster_df[cluster_df['weight'] >= self.merge_weight_limit]
-                if len(removed_merges) > 1:
-                    print("Removed these walkers from merging")
-                    print(removed_merges)
+                        # Add to the split_dict with each key corresponding to the index of the walker 
+                        # and the value being the number of splits
+                        for idx, n_splits in enumerate(chosen_splits):
+                            split_dict[int(sorted_segs[idx])] = int(n_splits + 1)
 
-                # Filter out the walkers with too much weight
-                cluster_df = cluster_df[cluster_df['weight'] < self.merge_weight_limit]
-                num_segs_for_merging = len(cluster_df)
-                # Need a minimum number of walkers for merging
-                if num_segs_for_merging < num_segs_in_cluster - segs_per_cluster + 1:
-                    print(f"Walkers up for merging have weights that are too large. Skipping split/merge on iteration {self.niter}...")
-                    merge_list = None
-                    break
-                else: # Merging gets to happen!
-                    # Number of splits needed to bring the cluster up to the set number of walkers per cluster
-                    num_merges_needed = num_segs_in_cluster - segs_per_cluster
-                    print(f"{num_merges_needed=}")
+                        print(f"{split_dict=}")
 
-                    combos = []
-                    self.find_combinations(num_merges_needed, [], 1, combos)
-                    # print(f"{combos=}")
-                    # print(f"{len(combos)=}")
-                    merges_possible = []
-                    for ind, x in enumerate(combos):
-                        if np.sum(x) <= num_segs_for_merging:
-                            merges_possible.append(x)
-                    del combos
-                    # # Jeremy's magical math
-                    # # split_possible is an array of possible ways to break up the x splits needed over y walkers
-                    # temp = np.asarray(list(product(range(num_merges_needed+1), repeat=segs_per_cluster)), dtype=int)
-                    # temp2 = np.array(temp)
-                    # temp2[temp2!=0] += 1
-                    # merges_possible = temp2[(np.sum(temp, axis=1) == num_merges_needed) & (np.sum(temp2, axis=1) <= num_segs_for_merging)]
-                    print(f"{merges_possible=}")
+                else: # need to merge some walkers
+                    # Find the walkers with too much weight
+                    removed_merges = cluster_df[cluster_df['weight'] >= self.merge_weight_limit]
+                    if len(removed_merges) > 1:
+                        print("Removed these walkers from merging")
+                        print(removed_merges)
 
-                    # This is the chosen merge motif for this cluster
-                    chosen_merge = list(merges_possible[self.rng.integers(len(merges_possible))])
-                    print(f'merge choice: {chosen_merge}')
-                    for n in chosen_merge:
-                        rows = cluster_df.sample(n, random_state=self.rng)
-                        merge_group = list(rows.inds.values)
-                        # Append the merge to the lsit of all merges
-                        merge_list.append(merge_group)
-                        print(f"{merge_group=}")
-                        # Remove the sampled rows
-                        cluster_df = cluster_df.drop(rows.index)
-                    print(f"{merge_list=}")
+                    # Filter out the walkers with too much weight
+                    cluster_df = cluster_df[cluster_df['weight'] < self.merge_weight_limit]
+                    num_segs_for_merging = len(cluster_df)
+                    # Need a minimum number of walkers for merging
+                    if num_segs_for_merging < num_segs_in_cluster - segs_per_cluster + 1:
+                        print(f"Walkers up for merging have weights that are too large. Skipping split/merge on iteration {self.niter}...")
+                        merge_list = None
+                        break
+                    else: # Merging gets to happen!
+                        merges_possible = []
+                        # Need to check there's enough walkers to use that particular merging scheme
+                        for ind, x in enumerate(combos):
+                            if np.sum(x + 1) <= num_segs_for_merging:
+                                merges_possible.append(x + 1)
+
+                        print(f"{merges_possible=}")
+
+                        # This is the chosen merge motif for this cluster
+                        chosen_merge = list(merges_possible[self.rng.integers(len(merges_possible))])
+                        print(f'merge choice: {chosen_merge}')
+
+                        cluster_df.sort_values('pcoord')
+                        print(f"{cluster_df=}")
+                        for n in chosen_merge:
+                            rows = cluster_df.tail(n)
+                            merge_group = list(rows.inds.values)
+                            # Append the merge to the list of all merges
+                            merge_list.append(merge_group)
+                            print(f"{merge_group=}")
+                            # Remove the sampled rows
+                            cluster_df = cluster_df.drop(rows.index)
+                        print(f"{merge_list=}")
 
         # Log dataframes
         df.to_csv(self.datasets_path / f"full-niter-{self.niter}.csv")
