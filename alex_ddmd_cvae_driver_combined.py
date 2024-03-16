@@ -569,6 +569,8 @@ class CustomDriver(DeepDriveMDDriver):
         os.makedirs(self.datasets_path, exist_ok=True)
         self.synd_model = self.load_synd_model()
         self.rng = np.random.default_rng()
+        self.ml_mode = "static"
+        self.static_chk_path = "checkpoint-epoch-25.pt"
 
     def lof_function(self, z: np.ndarray) -> np.ndarray:
         # Load up to the last 50 of all the latent coordinates here
@@ -778,8 +780,6 @@ class CustomDriver(DeepDriveMDDriver):
             self.machine_learning_method.train(all_coords)
     
     def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
-
-
         # Get data for sorting
         pcoord = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
         try:
