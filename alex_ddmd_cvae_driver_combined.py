@@ -799,9 +799,9 @@ class CustomDriver(DeepDriveMDDriver):
                         self.log_path
                         / f"ml-iter-{self.niter - self.niter % self.update_interval}"
                     )
-
-            # Init the ML method
-            self.train_path.mkdir(exist_ok=True)
+                # Init the ML method
+                self.train_path.mkdir(exist_ok=True)
+            
             self.machine_learning_method = MachineLearningMethod(
                 self.train_path, self.base_training_data_path
             )
