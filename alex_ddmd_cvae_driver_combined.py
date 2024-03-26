@@ -10,12 +10,13 @@ from natsort import natsorted
 import matplotlib.pyplot as plt
 from westpa.core.segment import Segment
 from scipy.sparse import coo_matrix
+from scipy.spatial import distance_matrix
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
 
 from sklearn.neighbors import LocalOutlierFactor
-from sklearn.cluster import KMeans
-from itertools import product
+from sklearn.cluster import KMeans, OPTICS
 from os.path import expandvars
+import math
 
 import os
 from westpa_ddmd.config import BaseSettings, mkdir_validator
@@ -34,7 +35,6 @@ log = logging.getLogger(__name__)
 # deepdrivemd.yaml file in the same directory as this script
 CONFIG_PATH = Path(__file__).parent / "deepdrivemd.yaml"
 SIM_ROOT_PATH = Path(__file__).parent
-
 
 class DeepDriveMDDriver(WEDriver, ABC):
     def _process_args(self):
@@ -388,7 +388,6 @@ def plot_scatter(
         )
     plt.savefig(output_path)
 
-
 class ExperimentSettings(BaseSettings):
     output_path: Path
     """Output directory for the run."""
@@ -419,7 +418,6 @@ class ExperimentSettings(BaseSettings):
     # validators
     _mkdir_output_path = mkdir_validator("output_path")
 
-
 class CVAESettings(BaseSettings):
     """Settings for mdlearn SymmetricConv2dVAETrainer object."""
 
@@ -442,7 +440,6 @@ class CVAESettings(BaseSettings):
     plot_log_every: int = 25
     plot_n_samples: int = 5000
     plot_method: Optional[str] = "raw"
-
 
 class MachineLearningMethod:
     def __init__(self, train_path: Path, base_training_data_path: Path) -> None:
@@ -477,7 +474,7 @@ class MachineLearningMethod:
         cols = [coo.col.astype("int16") for coo in coo_contact_maps]
         # Concatenate the rows and cols into a single array representing the contact maps
         return [np.concatenate(row_col) for row_col in zip(rows, cols)]
-
+    
     @property
     def save_path(self) -> Path:
         """Path to save the model."""
@@ -572,6 +569,31 @@ class CustomDriver(DeepDriveMDDriver):
         self.ml_mode = "static"
         self.static_chk_path = "checkpoint-epoch-25.pt"
 
+    def get_data_for_objective(self, z: np.ndarray, pcoords: np.ndarray):
+        if self.niter == 1:
+            embedding_history = []
+            pcoord_history = []
+        elif self.niter > self.kmeans_iteration_history:
+            embedding_history = [
+                np.load(self.datasets_path / f"z-{p}.npy")
+                for p in range(self.niter - self.kmeans_iteration_history, self.niter)
+            ]
+            pcoord_history = [
+                np.load(self.datasets_path / f"pcoord-{p}.npy")
+                for p in range(self.niter - self.kmeans_iteration_history, self.niter)
+            ]
+        else:
+            embedding_history = [np.load(p) for p in self.datasets_path.glob("z-*.npy")]
+            pcoord_history = [np.load(p) for p in self.datasets_path.glob("pcoord-*.npy")]
+        # Append the most recent frames to the end of the history
+        embedding_history.append(z)
+        embedding_history = np.concatenate(embedding_history)
+
+        pcoord_history.append(pcoords)
+        pcoord_history = np.concatenate(pcoord_history)
+
+        return embedding_history, pcoord_history
+    
     def lof_function(self, z: np.ndarray) -> np.ndarray:
         # Load up to the last 50 of all the latent coordinates here
         if self.niter > self.lof_iteration_history:
@@ -611,30 +633,9 @@ class CustomDriver(DeepDriveMDDriver):
             self.find_combinations(target - i, current_combination + [i], i, combo_list)
 
     def cluster_segments(self, z: np.ndarray, pcoords: np.ndarray) -> np.ndarray:
-        # Load up to the last 50 of all the latent coordinates here
-        if self.niter == 1:
-            embedding_history = []
-            pcoord_history = []
-        elif self.niter > self.kmeans_iteration_history:
-            embedding_history = [
-                np.load(self.datasets_path / f"z-{p}.npy")
-                for p in range(self.niter - self.kmeans_iteration_history, self.niter)
-            ]
-            pcoord_history = [
-                np.load(self.datasets_path / f"pcoord-{p}.npy")
-                for p in range(self.niter - self.kmeans_iteration_history, self.niter)
-            ]
-        else:
-            embedding_history = [np.load(p) for p in self.datasets_path.glob("z-*.npy")]
-            pcoord_history = [np.load(p) for p in self.datasets_path.glob("pcoord-*.npy")]
-        # Append the most recent frames to the end of the history
-        embedding_history.append(z)
-        embedding_history = np.concatenate(embedding_history)
+        # Load up to the old latent coordinates here
+        embedding_history, pcoord_history = self.get_data_for_objective(z, pcoords)
 
-        pcoord_history.append(pcoords)
-        pcoord_history = np.concatenate(pcoord_history)
-        # print(f"{pcoord_history.shape=}")
-        # print(f"{embedding_history.shape=}")
         # Perform the K-means clustering
         kmeans = KMeans(n_clusters=self.kmeans_clusters).fit(embedding_history)
         seg_labels = kmeans.labels_[-len(z):]
@@ -642,6 +643,27 @@ class CustomDriver(DeepDriveMDDriver):
             plot_scatter(
                 embedding_history,
                 kmeans.labels_,
+                self.log_path / f"embedding-cluster-{self.niter}.png",
+            )
+            plot_scatter(
+                embedding_history,
+                pcoord_history,
+                self.log_path / f"embedding-pcoord-{self.niter}.png",
+            )
+        return seg_labels
+    
+    def optics_cluster_segments(self, z: np.ndarray, pcoords: np.ndarray) -> np.ndarray:
+        # Load up to the old latent coordinates here
+        embedding_history, pcoord_history = self.get_data_for_objective(z, pcoords)
+
+        # Perform the K-means clustering
+        clustering = OPTICS(min_samples=5).fit(embedding_history)
+        seg_labels = clustering.labels_[-len(z):]
+        
+        if self.niter % 10 == 0:
+            plot_scatter(
+                embedding_history,
+                clustering.labels_,
                 self.log_path / f"embedding-cluster-{self.niter}.png",
             )
             plot_scatter(
@@ -831,18 +853,20 @@ class CustomDriver(DeepDriveMDDriver):
                 # Regardless of training, predict
                 z = self.machine_learning_method.predict(cur_dcoords)
             else:
+                print("Static")
                 # Regardless of training, predict
                 z = self.machine_learning_method.predict(cur_dcoords, self.static_chk_path)
             
             #print(f"{z.shape=}")
-            seg_labels = self.cluster_segments(z, pcoord)
+            seg_labels = self.optics_cluster_segments(z, pcoord)
+
         else:
             print("Ablation")
             seg_labels = [self.rng.integers(self.kmeans_clusters) for _ in range(self.nsegs)]
 
         df = pd.DataFrame(
             {
-                "kmeans_cluster": seg_labels,
+                "ls_cluster": seg_labels,
                 "inds": np.arange(self.nsegs),
                 "pcoord": pcoord,
                 "cluster_id": final_state,
@@ -850,18 +874,42 @@ class CustomDriver(DeepDriveMDDriver):
             }
         )   
         print(df)
-
-        # Check that the number of walkers is evenly divided by the number of clusters
-        assert self.nsegs % self.kmeans_clusters == 0 
-        # Ideal number of walkers per cluster
-        segs_per_cluster = int(self.nsegs / self.kmeans_clusters)
+            
         # Dictionary that maps the index of segments to the number of splits they need
         split_dict = {}
         # List that contains lists of indices of segments that will be merged together
         merge_list =[]
-        for id in range(self.kmeans_clusters):
+        # Set of all the cluster ids from OPTICS
+        cluster_ids = sorted(set(seg_labels))
+        print(f"{cluster_ids=}")
+        
+        # if there are any outliers
+        if -1 in cluster_ids:
+            # Get all outliers under the weight threshold
+            cluster_df = df[(df['ls_cluster'] == -1) & (df['weight'] >= self.split_weight_limit)]
+            walkers_added = len(cluster_df) * 2
+            # Loop through outliers
+            for ind in cluster_df.inds.values:
+                # Split each into two
+                split_dict[int(ind)] = 2
+            # Remove the -1 cluster from consideration
+            cluster_ids.remove(-1)
+            df = df[df['ls_cluster'] != -1]
+            
+            print(f"{split_dict=}")
+        else:
+            walkers_added = 0
+            
+        if walkers_added > len(df):
+            walkers_added = len(df) / 2
+
+        # Ideal number of walkers per cluster
+        segs_per_cluster = int(math.ceil((len(df) - walkers_added) / len(cluster_ids)))
+        print(f"{segs_per_cluster=}")
+        
+        for id in cluster_ids:
             # Get just the walkers in this cluster
-            cluster_df = df[df['kmeans_cluster'] == id].sort_values('pcoord')
+            cluster_df = df[df['ls_cluster'] == id].sort_values('pcoord')
             print(f"cluster_id: {id}")
             print(cluster_df)
             # Total number of walkers in the cluster
