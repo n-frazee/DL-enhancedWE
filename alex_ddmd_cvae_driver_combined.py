@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from westpa.core.segment import Segment
 from scipy.sparse import coo_matrix
 from scipy.spatial import distance_matrix
+from scipy.spatial.distance import cdist
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
 
 from sklearn.neighbors import LocalOutlierFactor
@@ -26,7 +27,7 @@ import westpa
 from westpa.core.binning import Bin
 from westpa.core.we_driver import WEDriver
 from westpa.core.h5io import tostr
-
+import pickle
 
 log = logging.getLogger(__name__)
 
@@ -319,9 +320,9 @@ class DeepDriveMDDriver(WEDriver, ABC):
             
             if not self.niter:
                 # Randomly merge til we have the target count
-                print(f"{len(bin_)=}")
+                # print(f"{len(bin_)=}")
                 self._adjust_count(ibin)
-                print(f"{len(bin_)=}")
+                # print(f"{len(bin_)=}")
 
             # This checks for initializing; if niter is 0 then skip resampling
             if self.niter:
@@ -358,7 +359,8 @@ class DeepDriveMDDriver(WEDriver, ABC):
                         self._merge_by_data(bin_, to_merge)
                 else:
                     print('Too many walkers outside the weight thresholds!')
-
+                
+                self._adjust_count(ibin)
         # another sanity check
         self._check_post()
 
@@ -523,6 +525,9 @@ class MachineLearningMethod:
         #print(self.autoencoder.model)
         # Compute the contact maps
         contact_maps = self.compute_sparse_contact_map(coords)
+        # with open("tmp.pkl", 'wb') as f:
+        #     pickle.dump(contact_maps, f)
+        #print(f"{contact_maps=}")
         # Predict the latent space coordinates
         if static_chk_path is not None:
             z, *_ = self.autoencoder.predict(
@@ -652,13 +657,15 @@ class CustomDriver(DeepDriveMDDriver):
             )
         return seg_labels
     
-    def optics_cluster_segments(self, z: np.ndarray, pcoords: np.ndarray) -> np.ndarray:
+    def optics_cluster_segments(self, embedding_history: np.ndarray, pcoord_history: np.ndarray) -> np.ndarray:
         # Load up to the old latent coordinates here
-        embedding_history, pcoord_history = self.get_data_for_objective(z, pcoords)
+        if self.niter > self.kmeans_iteration_history:
+            min_samples = 100
+        else:
+            min_samples = int(self.niter * 2) 
 
         # Perform the K-means clustering
-        clustering = OPTICS(min_samples=5).fit(embedding_history)
-        seg_labels = clustering.labels_[-len(z):]
+        clustering = OPTICS(min_samples=min_samples).fit(embedding_history)
         
         if self.niter % 10 == 0:
             plot_scatter(
@@ -671,7 +678,7 @@ class CustomDriver(DeepDriveMDDriver):
                 pcoord_history,
                 self.log_path / f"embedding-pcoord-{self.niter}.png",
             )
-        return seg_labels
+        return clustering.labels_
     
     def plot_prev_data(self):
         # Plot the old latent space projections of the training data and iteration data colored by phi
@@ -751,7 +758,6 @@ class CustomDriver(DeepDriveMDDriver):
                 dmatrix = self.synd_model.backmap([auxref], mapper='dmatrix')
                 curr_dcoords.append(dmatrix[0])
                 
-
         chosen_dcoords = []
         to_pop = []
         for idx, segment in enumerate(segments):
@@ -803,7 +809,7 @@ class CustomDriver(DeepDriveMDDriver):
     
     def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
         # Get data for sorting
-        pcoord = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
+        pcoords = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
         try:
             final_state = self.get_auxdata(cur_segments, "state_indices")[:, -1]
         except KeyError:
@@ -837,15 +843,20 @@ class CustomDriver(DeepDriveMDDriver):
 
             # Concatenate all frames together
             cur_dcoords = np.concatenate(cur_dcoords)
-            #print(f"{cur_dcoords.shape=}")
+            # print(f"{cur_dcoords.shape=}")
 
+            # for x in range(len(cur_dcoords)-1):
+            #     print(np.all(cur_dcoords[x] == cur_dcoords[x+1]))
             all_dcoords = self.get_prev_dcoords_training(next_segments, cur_dcoords, 10)
-            #print(f"{all_dcoords.shape=}")
-            cur_dcoords = all_dcoords[:self.nsegs]
-            #print(f"{cur_dcoords.shape=}")
 
-            np.save(self.datasets_path / f"dcoords-{self.niter}.npy", all_dcoords)
-            
+            # print(f"{all_dcoords.shape=}")
+            cur_dcoords = all_dcoords[:self.nsegs]
+            # print(f"{cur_dcoords.shape=}")
+            # for x in range(len(cur_dcoords)-1):
+            #     print(np.all(cur_dcoords[x] == cur_dcoords[x+1]))
+
+            np.save(self.datasets_path / f"dcoords-{self.niter}.npy", cur_dcoords)
+
             if self.ml_mode == 'train':
                 print("Train")
                 # Train a new model if it's time
@@ -857,24 +868,27 @@ class CustomDriver(DeepDriveMDDriver):
                 # Regardless of training, predict
                 z = self.machine_learning_method.predict(cur_dcoords, self.static_chk_path)
             
-            #print(f"{z.shape=}")
-            seg_labels = self.optics_cluster_segments(z, pcoord)
+            embedding_history, pcoord_history = self.get_data_for_objective(z, pcoords)
+            all_labels = self.optics_cluster_segments(embedding_history, pcoord_history)
+            seg_labels = all_labels[-self.nsegs:]
 
-        else:
+
+        else: # no ML of any kind
             print("Ablation")
             seg_labels = [self.rng.integers(self.kmeans_clusters) for _ in range(self.nsegs)]
 
         df = pd.DataFrame(
             {
                 "ls_cluster": seg_labels,
+                "outlier": np.zeros(self.nsegs).astype(bool),
                 "inds": np.arange(self.nsegs),
-                "pcoord": pcoord,
+                "pcoord": pcoords,
                 "cluster_id": final_state,
                 "weight": weight,
             }
         )   
-        print(df)
-            
+        # print(df)
+        # print(f"{z=}")
         # Dictionary that maps the index of segments to the number of splits they need
         split_dict = {}
         # List that contains lists of indices of segments that will be merged together
@@ -882,34 +896,53 @@ class CustomDriver(DeepDriveMDDriver):
         # Set of all the cluster ids from OPTICS
         cluster_ids = sorted(set(seg_labels))
         print(f"{cluster_ids=}")
-        
         # if there are any outliers
         if -1 in cluster_ids:
-            # Get all outliers under the weight threshold
-            cluster_df = df[(df['ls_cluster'] == -1) & (df['weight'] >= self.split_weight_limit)]
-            walkers_added = len(cluster_df) * 2
-            # Loop through outliers
-            for ind in cluster_df.inds.values:
-                # Split each into two
-                split_dict[int(ind)] = 2
-            # Remove the -1 cluster from consideration
-            cluster_ids.remove(-1)
-            df = df[df['ls_cluster'] != -1]
+            # Set all the -1s to be outliers
+            df['outlier'] = np.where(df['ls_cluster'] == -1, True, False)
+            # Remove the outliers from the projections and labels
+            inlier_embedding_history = embedding_history[all_labels != -1]
+            inlier_labels = all_labels[all_labels != -1]
+            # print(f"{inlier_embedding_history.shape=}")
+            # print(f"{inlier_embedding_history=}")
+            # print(f"{inlier_labels.shape=}")
+            # print(f"{inlier_labels=}")
             
-            print(f"{split_dict=}")
-        else:
-            walkers_added = 0
-            
-        if walkers_added > len(df):
-            walkers_added = len(df) / 2
-
+            # Loop through the outlier indices
+            for ind in df[df['outlier']].inds.values:
+                # print(f"{ind=}")
+                # Find the distance to points in the embedding_history
+                dist = cdist(z[ind].reshape(-1, z.shape[1]), inlier_embedding_history)
+                # print(f"{dist=}")
+                # Set zero dists to the max; should only happen if measuring the point to itself
+                dist[dist == 0] = np.max(dist)
+                # print(f"{dist=}")
+                # Find the min index
+                min_ind = np.argmin(dist)
+                # print(f"{min_ind=}")
+                # Set the ls_cluster for the outlier to match the min dist point
+                df.loc[ind, 'ls_cluster'] = inlier_labels[min_ind]
+                # print(df)
+        
+        # Set of all the cluster ids from OPTICS
+        cluster_ids = sorted(set(df.ls_cluster.values))
+        print(f"{cluster_ids=}")
+        
+        # print("After adjusting outliers")
+        print(df)
         # Ideal number of walkers per cluster
-        segs_per_cluster = int(math.ceil((len(df) - walkers_added) / len(cluster_ids)))
+        segs_per_cluster = int(math.floor((len(df)) / len(cluster_ids)))
+
+        # if self.nsegs > 32:
+        #     segs_per_cluster = int(math.floor((len(df)) / len(cluster_ids)))
+        # else:
+        #     segs_per_cluster = int(math.ceil((len(df)) / len(cluster_ids)))
+
         print(f"{segs_per_cluster=}")
         
         for id in cluster_ids:
             # Get just the walkers in this cluster
-            cluster_df = df[df['ls_cluster'] == id].sort_values('pcoord')
+            cluster_df = df[df['ls_cluster'] == id].sort_values(["outlier", 'pcoord'], ascending=[False, True])
             print(f"cluster_id: {id}")
             print(cluster_df)
             # Total number of walkers in the cluster
@@ -935,7 +968,8 @@ class CustomDriver(DeepDriveMDDriver):
                         print(removed_splits)
                             
                     # Filter out weights above the threshold 
-                    cluster_df = cluster_df[cluster_df['weight'] > self.split_weight_limit].sort_values("pcoord")
+                    cluster_df = cluster_df[cluster_df['weight'] > self.split_weight_limit].sort_values(["outlier", 'pcoord'], ascending=[False, True])
+
                     # The number of walkers that have sufficient weight for splitting
                     num_segs_for_splitting = len(cluster_df)
                     # Test if there are enough walkers with sufficient weight to split
@@ -952,6 +986,8 @@ class CustomDriver(DeepDriveMDDriver):
                         # This is the chosen split motif for this cluster
                         chosen_splits = sorted(split_possible[self.rng.integers(len(split_possible))], reverse=True)
                         print(f'split choice: {chosen_splits}')
+                        # Check if there are any outliers associated with this cluster
+
                         sorted_segs = cluster_df.inds.values
                         print(f"{sorted_segs=}")
 
@@ -970,7 +1006,7 @@ class CustomDriver(DeepDriveMDDriver):
                         print(removed_merges)
 
                     # Filter out the walkers with too much weight
-                    cluster_df = cluster_df[cluster_df['weight'] < self.merge_weight_limit].sort_values('pcoord')
+                    cluster_df = cluster_df[cluster_df['weight'] < self.merge_weight_limit].sort_values(["outlier", 'pcoord'], ascending=[False, True])
                     num_segs_for_merging = len(cluster_df)
                     # Need a minimum number of walkers for merging
                     if num_segs_for_merging < num_segs_in_cluster - segs_per_cluster + 1:
@@ -984,7 +1020,7 @@ class CustomDriver(DeepDriveMDDriver):
                             if np.sum(x + 1) <= num_segs_for_merging:
                                 merges_possible.append(x + 1)
 
-                        print(f"{merges_possible=}")
+                        # print(f"{merges_possible=}")
 
                         # This is the chosen merge motif for this cluster
                         chosen_merge = sorted(list(merges_possible[self.rng.integers(len(merges_possible))]), reverse=True)
@@ -1013,7 +1049,7 @@ class CustomDriver(DeepDriveMDDriver):
                 self.datasets_path / f"last-z-{self.niter}.npy",
                 np.reshape(z, (self.nsegs, self.nframes, -1))[:, -1, :],
             )
-            np.save(self.datasets_path / f"pcoord-{self.niter}.npy", pcoord)
+            np.save(self.datasets_path / f"pcoord-{self.niter}.npy", pcoords)
 
         return split_dict, merge_list
 
