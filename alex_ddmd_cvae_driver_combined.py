@@ -40,12 +40,11 @@ SIM_ROOT_PATH = Path(__file__).parent
 class DeepDriveMDDriver(WEDriver, ABC):
     def _process_args(self):
         float_class = ['split_weight_limit', 'merge_weight_limit']
-        int_class = ['update_interval', 'lag_iterations', 'kmeans_clsuters',
+        int_class = ['update_interval', 'lag_iterations', 'kmeans_clusters',
                      'kmeans_iteration_history']
                  
         self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
-        self.cfg.update({'train_path': None, 'machine_learning_method': None, 
-                         'static_chk_path': None, 'ml_mode': None})
+        self.cfg.update({'train_path': None, 'machine_learning_method': None})
         for key in self.cfg:
             if key in int_class:
                 setattr(self, key, int(self.cfg[key]))
@@ -571,8 +570,8 @@ class CustomDriver(DeepDriveMDDriver):
         os.makedirs(self.datasets_path, exist_ok=True)
         self.synd_model = self.load_synd_model()
         self.rng = np.random.default_rng()
-        self.ml_mode = "static"
-        self.static_chk_path = "checkpoint-epoch-25.pt"
+        #self.ml_mode = "static"
+        #self.static_chk_path = "checkpoint-epoch-25.pt"
 
     def get_data_for_objective(self, z: np.ndarray, pcoords: np.ndarray):
         if self.niter == 1:
