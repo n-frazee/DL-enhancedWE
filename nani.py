@@ -6,6 +6,108 @@ import MDAnalysis as mda
 import subprocess
 import os
 
+def calculate_counters(c_total, n_objects, c_threshold=None, w_factor="fraction"):
+    """Calculate 1-similarity, 0-similarity, and dissimilarity counters
+
+    Parameters
+    ---------
+    c_total : array-like of shape (n_objects, n_features)
+        Vector containing the sums of each column of the fingerprint matrix.
+
+    n_objects : int
+        Number of objects to be compared.
+
+    c_threshold : {None, 'dissimilar', int}
+        Coincidence threshold.
+        None : Default, c_threshold = n_objects % 2
+        'dissimilar' : c_threshold = np.ceil(n_objects / 2)
+        int : Integer number < n_objects
+        float : Real number in the (0 , 1) interval. Indicates the % of the total data that will serve as threshold.
+
+    w_factor : {"fraction", "power_n"}
+        Type of weight function that will be used.
+        'fraction' : similarity = d[k]/n
+                     dissimilarity = 1 - (d[k] - n_objects % 2)/n_objects
+        'power_n' : similarity = n**-(n_objects - d[k])
+                    dissimilarity = n**-(d[k] - n_objects % 2)
+        other values : similarity = dissimilarity = 1
+
+    Returns
+    -------
+    counters : dict
+        Dictionary with the weighted and non-weighted counters.
+    """
+    # Assign c_threshold
+    if not c_threshold:
+        c_threshold = n_objects % 2
+    if c_threshold == 'dissimilar':
+        c_threshold = np.ceil(n_objects / 2)
+    if c_threshold == 'min':
+        c_threshold = n_objects % 2
+    if isinstance(c_threshold, int):
+        if c_threshold >= n_objects:
+            raise ValueError("c_threshold cannot be equal or greater than n_objects.")
+        c_threshold = c_threshold
+    if 0 < c_threshold < 1:
+        c_threshold *= n_objects
+
+    # Set w_factor
+    if w_factor:
+        if "power" in w_factor:
+            power = int(w_factor.split("_")[-1])
+            def f_s(d):
+                return power**-float(n_objects - d)
+
+            def f_d(d):
+                return power**-float(d - n_objects % 2)
+        elif w_factor == "fraction":
+            def f_s(d):
+                return d/n_objects
+
+            def f_d(d):
+                return 1 - (d - n_objects % 2)/n_objects
+        else:
+            def f_s(d):
+                return 1
+
+            def f_d(d):
+                return 1
+    else:
+        def f_s(d):
+            return 1
+
+        def f_d(d):
+            return 1
+
+    # Calculate a, d, b + c
+
+    a_indices = 2 * c_total - n_objects > c_threshold
+    d_indices = n_objects - 2 * c_total > c_threshold
+    dis_indices = np.abs(2 * c_total - n_objects) <= c_threshold
+
+    a = np.sum(a_indices)
+    d = np.sum(d_indices)
+    total_dis = np.sum(dis_indices)
+
+    a_w_array = f_s(2 * c_total[a_indices] - n_objects)
+    d_w_array = f_s(abs(2 * c_total[d_indices] - n_objects))
+    total_w_dis_array = f_d(abs(2 * c_total[dis_indices] - n_objects))
+
+    w_a = np.sum(a_w_array)
+    w_d = np.sum(d_w_array)
+    total_w_dis = np.sum(total_w_dis_array)
+
+    total_sim = a + d
+    total_w_sim = w_a + w_d
+    p = total_sim + total_dis
+    w_p = total_w_sim + total_w_dis
+
+    counters = {"a": a, "w_a": w_a, "d": d, "w_d": w_d,
+                "total_sim": total_sim, "total_w_sim": total_w_sim,
+                "total_dis": total_dis, "total_w_dis": total_w_dis,
+                "p": p, "w_p": w_p}
+    return counters
+
 
 def gen_traj_numpy(prmtopFileName, trajFileName, atomSel):
     """Reads in a trajectory and returns a 2D numpy array of the coordinates 
@@ -856,8 +958,8 @@ class KmeansNANI:
         """
         if self.init_type in ['comp_sim', 'div_select', 'vanilla_kmeans++']:
             initiators = self.initiate_kmeans()
-            #print(f'{initiators=}')
-            #print(f'{initiators[0][0] != initiators[1][0]} {initiators[0][1] != initiators[1][1]} {initiators[0][2] != initiators[1][2]}')
+            # print(f'{initiators=}')
+            # print(f'{initiators[0][0] != initiators[1][0]} {initiators[0][1] != initiators[1][1]} {initiators[0][2] != initiators[1][2]}')
             labels, centers, n_iter = self.kmeans_clustering(initiators)
         elif self.init_type == 'k-means++' or self.init_type == 'random':
             labels, centers, n_iter = self.kmeans_clustering(initiators=self.init_type)
