@@ -26,6 +26,8 @@ from westpa.core.binning import Bin
 from westpa.core.we_driver import WEDriver
 from westpa.core.h5io import tostr
 
+from nani import KmeansNANI
+
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +36,6 @@ log = logging.getLogger(__name__)
 # deepdrivemd.yaml file in the same directory as this script
 CONFIG_PATH = Path(__file__).parent / "deepdrivemd.yaml"
 SIM_ROOT_PATH = Path(__file__).parent
-
 
 class DeepDriveMDDriver(WEDriver, ABC):
     def _process_args(self):
@@ -561,10 +562,25 @@ class CustomDriver(DeepDriveMDDriver):
 
         return synd_model
 
+    def _process_NANI_args(self):
+        float_class = []
+        int_class = ['n_clusters', 'sieve', 'n_structures']
+                 
+        self.cfg = westpa.rc.config.get(['west', 'mdance'], {})
+        self.cfg.update({})
+        for key in self.cfg:
+            if key in int_class:
+                setattr(self, key, int(self.cfg[key]))
+            elif key in float_class:
+                setattr(self, key, float(self.cfg[key]))
+            else:
+                setattr(self, key, self.cfg[key])
+
     def __init__(self, rc=None, system=None):
         super().__init__(rc, system)
 
         self._process_args()
+        self._process_NANI_args()
 
         self.base_training_data_path = expandvars('$WEST_SIM_ROOT/common_files/train.npy')
 
@@ -644,15 +660,21 @@ class CustomDriver(DeepDriveMDDriver):
 
         pcoord_history.append(pcoords)
         pcoord_history = np.concatenate(pcoord_history)
-        # print(f"{pcoord_history.shape=}")
-        # print(f"{embedding_history.shape=}")
+        #print(f"{pcoord_history.shape=}")
+        #print(f"{embedding_history.shape=}")
+        #print(f"{embedding_history=}")
         # Perform the K-means clustering
-        kmeans = KMeans(n_clusters=self.kmeans_clusters).fit(embedding_history)
-        seg_labels = kmeans.labels_[-len(z):]
+        
+        NANI_labels, NANI_centers, NANI_n_iter = KmeansNANI(data=embedding_history, n_clusters=self.n_clusters, metric=self.metric).execute_kmeans_all()
+
+        #print(NANI_labels)
+
+        #kmeans = KMeans(n_clusters=self.kmeans_clusters).fit(embedding_history)
+        seg_labels = NANI_labels[-len(z):] #kmeans.labels_[-len(z):]
         if self.niter % 10 == 0:
             plot_scatter(
                 embedding_history,
-                kmeans.labels_,
+                NANI_labels, # kmeans.labels_,
                 self.log_path / f"embedding-cluster-{self.niter}.png",
             )
             plot_scatter(
@@ -707,8 +729,6 @@ class CustomDriver(DeepDriveMDDriver):
         return None
 
     def get_prev_dcoords_training(self, segments, curr_dcoords, iters_back):
-
-        
         # print('func')
         # for seg in segments:
         #     print(seg)
@@ -841,7 +861,7 @@ class CustomDriver(DeepDriveMDDriver):
             final_state = self.get_restart_auxdata("state_indices")[:, -1]
         
         weight = self.get_weights(cur_segments)[:]
-
+        #seg_labels = [self.rng.integers(self.kmeans_clusters) for _ in range(self.nsegs)]
 
         df = pd.DataFrame(
             {

@@ -675,7 +675,7 @@ class KmeansNANI:
     write_centroids(self, centroids, n_iter)
         Writes the centroids of the k-means algorithm to a file.
     """
-    def __init__(self, data, n_clusters, metric, N_atoms, init_type='comp_sim', **kwargs):
+    def __init__(self, data, n_clusters, metric, N_atoms=1, init_type='comp_sim', **kwargs):
         """Initializes the KmeansNANI class.
 
         Parameters
@@ -782,10 +782,16 @@ class KmeansNANI:
         """
         if self.init_type in ['k-means++', 'random']:
             initiators = self.init_type
+            n_clusters = self.n_clusters
         elif isinstance(initiators, np.ndarray):
             initiators = initiators[:self.n_clusters]
+            if len(initiators) < self.n_clusters:
+                n_clusters = len(initiators)
+            else:
+                n_clusters = self.n_clusters
+
         n_init = 1
-        kmeans = KMeans(self.n_clusters, init=initiators, n_init=n_init, random_state=None)
+        kmeans = KMeans(n_clusters, init=initiators, n_init=n_init, random_state=None)
         kmeans.fit(self.data)
         labels = kmeans.labels_
         centers = kmeans.cluster_centers_
@@ -850,6 +856,8 @@ class KmeansNANI:
         """
         if self.init_type in ['comp_sim', 'div_select', 'vanilla_kmeans++']:
             initiators = self.initiate_kmeans()
+            #print(f'{initiators=}')
+            #print(f'{initiators[0][0] != initiators[1][0]} {initiators[0][1] != initiators[1][1]} {initiators[0][2] != initiators[1][2]}')
             labels, centers, n_iter = self.kmeans_clustering(initiators)
         elif self.init_type == 'k-means++' or self.init_type == 'random':
             labels, centers, n_iter = self.kmeans_clustering(initiators=self.init_type)
