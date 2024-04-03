@@ -808,31 +808,31 @@ class CustomDriver(DeepDriveMDDriver):
 
         # extract and format current iteration's data
         # additional audxata can be extracted in a similar manner
-        # try:
-        #     cur_dcoords = self.get_dcoords(cur_segments)
-        # except KeyError:
-        #     cur_dcoords = self.get_restart_dcoords()
+        try:
+            cur_dcoords = self.get_dcoords(cur_segments)
+        except KeyError:
+            cur_dcoords = self.get_restart_dcoords()
 
         # Concatenate all frames together
-        #cur_dcoords = np.concatenate(cur_dcoords)
+        cur_dcoords = np.concatenate(cur_dcoords)
         #print(f"{cur_dcoords.shape=}")
 
-        #all_dcoords = self.get_prev_dcoords_training(next_segments, cur_dcoords, 10)
+        all_dcoords = self.get_prev_dcoords_training(next_segments, cur_dcoords, 10)
         #print(f"{all_dcoords.shape=}")
-        #cur_dcoords = all_dcoords[:self.nsegs]
+        cur_dcoords = all_dcoords[:self.nsegs]
         #print(f"{cur_dcoords.shape=}")
 
-        #np.save(self.datasets_path / f"dcoords-{self.niter}.npy", all_dcoords)
+        np.save(self.datasets_path / f"dcoords-{self.niter}.npy", all_dcoords)
         
         # # Train a new model if it's time
         # self.train_decider(all_dcoords)
 
         # Regardless of training, predict
-        #z = self.machine_learning_method.predict(cur_dcoords)
+        z = self.machine_learning_method.predict(cur_dcoords)
         #print(f"{z.shape=}")
 
         pcoord = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
-        #seg_labels = self.cluster_segments(z, pcoord)
+        seg_labels = self.cluster_segments(z, pcoord)
         print('Clustered!')
         # Get data for sorting
         try:
@@ -841,7 +841,7 @@ class CustomDriver(DeepDriveMDDriver):
             final_state = self.get_restart_auxdata("state_indices")[:, -1]
         
         weight = self.get_weights(cur_segments)[:]
-        seg_labels = [self.rng.integers(self.kmeans_clusters) for _ in range(self.nsegs)]
+
 
         df = pd.DataFrame(
             {
@@ -964,13 +964,13 @@ class CustomDriver(DeepDriveMDDriver):
         df.to_csv(self.datasets_path / f"full-niter-{self.niter}.csv")
 
         # Log the machine learning outputs
-        # np.save(self.datasets_path / f"z-{self.niter}.npy", z)
+        np.save(self.datasets_path / f"z-{self.niter}.npy", z)
 
         # Save data for plotting
-        # np.save(
-        #     self.datasets_path / f"last-z-{self.niter}.npy",
-        #     np.reshape(z, (self.nsegs, self.nframes, -1))[:, -1, :],
-        # )
+        np.save(
+            self.datasets_path / f"last-z-{self.niter}.npy",
+            np.reshape(z, (self.nsegs, self.nframes, -1))[:, -1, :],
+        )
         np.save(self.datasets_path / f"pcoord-{self.niter}.npy", pcoord)
 
         return split_dict, merge_list
