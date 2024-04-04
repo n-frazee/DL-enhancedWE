@@ -665,7 +665,7 @@ class CustomDriver(DeepDriveMDDriver):
         #print(f"{embedding_history=}")
         # Perform the K-means clustering
         
-        NANI_labels, NANI_centers, NANI_n_iter = KmeansNANI(data=embedding_history, n_clusters=self.n_clusters, metric=self.metric).execute_kmeans_all()
+        NANI_labels, NANI_centers, NANI_n_iter = KmeansNANI(data=embedding_history, n_clusters=self.n_clusters, metric=self.metric, init_type=self.init_type, percentage=self.percentage).execute_kmeans_all()
 
         #print(NANI_labels)
 

@@ -889,6 +889,7 @@ class KmeansNANI:
             initiators = initiators[:self.n_clusters]
             if len(initiators) < self.n_clusters:
                 n_clusters = len(initiators)
+                print(f'Using {n_clusters}')
             else:
                 n_clusters = self.n_clusters
 
