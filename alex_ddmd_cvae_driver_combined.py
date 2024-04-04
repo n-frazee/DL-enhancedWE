@@ -721,8 +721,8 @@ class CustomDriver(DeepDriveMDDriver):
                 # Calculate the second derivative
                 result[idx] =  [i_cluster, all_db[idx] + all_db[idx+2] - (2*all_db[idx+1])]
 
-            chosen_idx = np.argmax(result[:,1])
-            chosen_k = result[chosen_idx, 0]
+            chosen_idx = np.argmax(result[:,1])+1
+            chosen_k = result[chosen_idx-1, 0]
         else:  # Pick only by using the lowest DBI
             chosen_idx = np.argmin(all_scores[:, 3])
             chosen_k = all_scores[chosen_idx, 0]
