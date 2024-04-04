@@ -29,7 +29,7 @@ from westpa.core.we_driver import WEDriver
 from westpa.core.h5io import tostr
 import pickle
 
-from nani import KmeansNANI
+from nani import KmeansNANI, compute_scores, extended_comparison
 
 log = logging.getLogger(__name__)
 
@@ -556,11 +556,22 @@ class CustomDriver(DeepDriveMDDriver):
 
     def _process_mdance_args(self):
         float_class = []
-        int_class = ['n_clusters', 'sieve', 'n_structures',
-                     'percentage']
+        int_class = ['sieve', 'n_structures', 'percentage']
                  
         self.cfg = westpa.rc.config.get(['west', 'mdance'], {})
         self.cfg.update({})
+        
+        if 'n_clusters' in self.cfg:
+            temp = self.cfg['n_clusters']
+            if isinstance(temp, str):
+                from ast import literal_eval
+
+                self.cfg['n_clusters'] = literal_eval(temp)
+                del temp
+
+        if 'percentage' not in self.cfg:
+            self.cfg.update({'percentage': 10})
+
         for key in self.cfg:
             if key in int_class:
                 setattr(self, key, int(self.cfg[key]))
@@ -568,7 +579,6 @@ class CustomDriver(DeepDriveMDDriver):
                 setattr(self, key, float(self.cfg[key]))
             else:
                 setattr(self, key, self.cfg[key])
-
 
     def __init__(self, rc=None, system=None):
         super().__init__(rc, system)
@@ -667,6 +677,60 @@ class CustomDriver(DeepDriveMDDriver):
                 self.log_path / f"embedding-pcoord-{self.niter}.png",
             )
         return seg_labels
+
+    def knani_scan_cluster_segments(self, embedding_history, pcoord_history: np.ndarray) -> np.ndarray:
+        # Perform the K-means clustering
+        all_scores, all_models = [], []
+
+        if self.init_type in ['comp_sim', 'div_select']:
+            model = KmeansNANI(data=embedding_history, n_clusters=self.n_clusters[1], metric=self.metric, init_type=self.init_type, percentage=self.percentage)
+            initiators = model.initiate_kmeans() 
+
+        for i_clusters in range(self.n_clusters[0], self.n_clusters[1]+1):
+            total = 0
+
+            model = KmeansNANI(data=embedding_history, n_clusters=i_clusters, metric=self.metric, init_type=self.init_type, percentage=self.percentage)
+            if self.init_type == 'vanilla_kmeans++':
+                initiators = model.initiate_kmeans()
+            elif self.init_type in ['comp_sim', 'div_select']:
+                pass
+            else:  # For k-means++, random
+                initiators = self.init_type
+            labels, centers, n_iter = model.kmeans_clustering(initiators=initiators)
+
+            all_models.append([labels, centers])
+            ch_score, db_score = compute_scores(embedding_history, labels=labels)
+
+            dictionary = {}
+            for j in range(i_clusters):
+                dictionary[j] = embedding_history[np.where(labels == j)[0]]
+            for val in dictionary.values():
+                total += extended_comparison(np.asarray(val), traj_numpy_type='full', metric=self.metric)
+
+            all_scores.append((i_clusters, n_iter, ch_score, db_score, total/i_clusters))
+
+
+        all_scores = np.array(all_scores)
+
+        chosen_idx = np.argmin(all_scores[:, 3])
+        chosen_k = all_scores[chosen_idx, 0]
+
+        header = f'init_type: {self.init_type}, percentage: {self.percentage}, metric: {self.metric}'
+        header += 'Number of Clusters, Number of Iterations, Calinski-Harabasz score, Davies-Bouldin score, Average MSD'
+        np.savetxt(self.log_path / f"{self.niter}-{self.percentage}{self.init_type}_summary.csv", all_scores, delimiter=',', header=header, fmt='%s')
+
+        if self.niter % 10 == 0:
+            plot_scatter(
+                embedding_history,
+                all_models[chosen_idx][0],
+                self.log_path / f"embedding-cluster-{self.niter}.png",
+            )
+            plot_scatter(
+                embedding_history,
+                pcoord_history,
+                self.log_path / f"embedding-pcoord-{self.niter}.png",
+            )
+        return all_models[chosen_idx][0], int(chosen_k)
 
     def knani_cluster_segments(self, embedding_history, pcoord_history: np.ndarray) -> np.ndarray:
         # Perform the K-means clustering
@@ -898,14 +962,17 @@ class CustomDriver(DeepDriveMDDriver):
             
             embedding_history, pcoord_history = self.get_data_for_objective(z, pcoords)
             if self.knani:
-                all_labels = self.knani_cluster_segments(embedding_history, pcoord_history)
-                print("running k-nani")
+                if isinstance(self.n_clusters, tuple):
+                    all_labels, output_n_clusters = self.knani_scan_cluster_segments(embedding_history, pcoord_history)
+                    print(f'scanned {self.n_clusters} and used {output_n_clusters}')
+                else:
+                    all_labels = self.knani_cluster_segments(embedding_history, pcoord_history)
+                    print(f"running k-nani with {self.n_clusters}")
             else:
                 all_labels = self.optics_cluster_segments(embedding_history, pcoord_history)
                 print("running optics")
             
             seg_labels = all_labels[-self.nsegs:]
-
 
         else: # no ML of any kind
             print("Ablation")
