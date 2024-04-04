@@ -686,10 +686,10 @@ class CustomDriver(DeepDriveMDDriver):
             model = KmeansNANI(data=embedding_history, n_clusters=self.n_clusters[1], metric=self.metric, init_type=self.init_type, percentage=self.percentage)
             initiators = model.initiate_kmeans() 
 
-        for i_clusters in range(self.n_clusters[0], self.n_clusters[1]+1):
+        for i_cluster in range(self.n_clusters[0], self.n_clusters[1]+1):
             total = 0
 
-            model = KmeansNANI(data=embedding_history, n_clusters=i_clusters, metric=self.metric, init_type=self.init_type, percentage=self.percentage)
+            model = KmeansNANI(data=embedding_history, n_clusters=i_cluster, metric=self.metric, init_type=self.init_type, percentage=self.percentage)
             if self.init_type == 'vanilla_kmeans++':
                 initiators = model.initiate_kmeans()
             elif self.init_type in ['comp_sim', 'div_select']:
@@ -702,18 +702,30 @@ class CustomDriver(DeepDriveMDDriver):
             ch_score, db_score = compute_scores(embedding_history, labels=labels)
 
             dictionary = {}
-            for j in range(i_clusters):
+            for j in range(i_cluster):
                 dictionary[j] = embedding_history[np.where(labels == j)[0]]
             for val in dictionary.values():
                 total += extended_comparison(np.asarray(val), traj_numpy_type='full', metric=self.metric)
 
-            all_scores.append((i_clusters, n_iter, ch_score, db_score, total/i_clusters))
+            all_scores.append((i_cluster, n_iter, ch_score, db_score, total/i_cluster))
 
 
         all_scores = np.array(all_scores)
 
-        chosen_idx = np.argmin(all_scores[:, 3])
-        chosen_k = all_scores[chosen_idx, 0]
+        if self.db_second:
+            print(f'using second derivative of DBI to find optimal N')
+            all_db = all_scores[:, 3]
+            result = np.zeros((len(all_scores)-2, 2))
+
+            for idx, i_cluster in enumerate(all_scores[1:-1, 0]):
+                # Calculate the second derivative
+                result[idx] =  [i_cluster, all_db[idx] + all_db[idx+2] - (2*all_db[idx+1])]
+
+            chosen_idx = np.argmax(result[:,1])
+            chosen_k = result[chosen_idx, 0]
+        else:  # Pick only by using the lowest DBI
+            chosen_idx = np.argmin(all_scores[:, 3])
+            chosen_k = all_scores[chosen_idx, 0]
 
         header = f'init_type: {self.init_type}, percentage: {self.percentage}, metric: {self.metric}'
         header += 'Number of Clusters, Number of Iterations, Calinski-Harabasz score, Davies-Bouldin score, Average MSD'
