@@ -8,4 +8,5 @@ rm -f west.log
 
 # Run w_run
 #w_run "$@" > west.log
-w_run --n-workers 1 "$@" |tee west.log
+w_run --n-workers 1 "$@" > west.log
+

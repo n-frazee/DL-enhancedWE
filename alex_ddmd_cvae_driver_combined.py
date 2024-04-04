@@ -29,13 +29,10 @@ from westpa.core.we_driver import WEDriver
 from westpa.core.h5io import tostr
 import pickle
 
+from nani import KmeansNANI
+
 log = logging.getLogger(__name__)
 
-# TODO: This is a temporary solution until we can pass
-# arguments through the westpa config. Requires a
-# deepdrivemd.yaml file in the same directory as this script
-CONFIG_PATH = Path(__file__).parent / "deepdrivemd.yaml"
-SIM_ROOT_PATH = Path(__file__).parent
 
 class DeepDriveMDDriver(WEDriver, ABC):
     def _process_args(self):
@@ -557,10 +554,27 @@ class CustomDriver(DeepDriveMDDriver):
 
         return synd_model
 
+    def _process_mdance_args(self):
+        float_class = []
+        int_class = ['n_clusters', 'sieve', 'n_structures',
+                     'percentage']
+                 
+        self.cfg = westpa.rc.config.get(['west', 'mdance'], {})
+        self.cfg.update({})
+        for key in self.cfg:
+            if key in int_class:
+                setattr(self, key, int(self.cfg[key]))
+            elif key in float_class:
+                setattr(self, key, float(self.cfg[key]))
+            else:
+                setattr(self, key, self.cfg[key])
+
+
     def __init__(self, rc=None, system=None):
         super().__init__(rc, system)
 
         self._process_args()
+        self._process_mdance_args()
 
         self.base_training_data_path = expandvars('$WEST_SIM_ROOT/common_files/train.npy')
 
@@ -570,8 +584,6 @@ class CustomDriver(DeepDriveMDDriver):
         os.makedirs(self.datasets_path, exist_ok=True)
         self.synd_model = self.load_synd_model()
         self.rng = np.random.default_rng()
-        #self.ml_mode = "static"
-        #self.static_chk_path = "checkpoint-epoch-25.pt"
 
     def get_data_for_objective(self, z: np.ndarray, pcoords: np.ndarray):
         if self.niter == 1:
@@ -655,7 +667,24 @@ class CustomDriver(DeepDriveMDDriver):
                 self.log_path / f"embedding-pcoord-{self.niter}.png",
             )
         return seg_labels
-    
+
+    def knani_cluster_segments(self, embedding_history, pcoord_history: np.ndarray) -> np.ndarray:
+        # Perform the K-means clustering
+        NANI_labels, NANI_centers, NANI_n_iter = KmeansNANI(data=embedding_history, n_clusters=self.n_clusters, metric=self.metric, init_type=self.init_type, percentage=self.percentage).execute_kmeans_all()
+        
+        if self.niter % 10 == 0:
+            plot_scatter(
+                embedding_history,
+                NANI_labels,
+                self.log_path / f"embedding-cluster-{self.niter}.png",
+            )
+            plot_scatter(
+                embedding_history,
+                pcoord_history,
+                self.log_path / f"embedding-pcoord-{self.niter}.png",
+            )
+        return NANI_labels
+
     def optics_cluster_segments(self, embedding_history: np.ndarray, pcoord_history: np.ndarray) -> np.ndarray:
         # Load up to the old latent coordinates here
         if self.niter > self.kmeans_iteration_history:
@@ -868,7 +897,13 @@ class CustomDriver(DeepDriveMDDriver):
                 z = self.machine_learning_method.predict(cur_dcoords, self.static_chk_path)
             
             embedding_history, pcoord_history = self.get_data_for_objective(z, pcoords)
-            all_labels = self.optics_cluster_segments(embedding_history, pcoord_history)
+            if self.knani:
+                all_labels = self.knani_cluster_segments(embedding_history, pcoord_history)
+                print("running k-nani")
+            else:
+                all_labels = self.optics_cluster_segments(embedding_history, pcoord_history)
+                print("running optics")
+            
             seg_labels = all_labels[-self.nsegs:]
 
 
