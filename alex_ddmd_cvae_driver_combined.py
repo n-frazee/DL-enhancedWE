@@ -15,7 +15,7 @@ from scipy.spatial.distance import cdist
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
 
 from sklearn.neighbors import LocalOutlierFactor
-from sklearn.cluster import KMeans, OPTICS
+from sklearn.cluster import KMeans, OPTICS, DBSCAN
 from os.path import expandvars
 import math
 
@@ -27,7 +27,6 @@ import westpa
 from westpa.core.binning import Bin
 from westpa.core.we_driver import WEDriver
 from westpa.core.h5io import tostr
-import pickle
 
 log = logging.getLogger(__name__)
 
@@ -44,8 +43,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
                      'kmeans_iteration_history']
                  
         self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
-        self.cfg.update({'train_path': None, 'machine_learning_method': None, 
-                         'static_chk_path': None, 'ml_mode': None})
+        self.cfg.update({'train_path': None, 'machine_learning_method': None})
         for key in self.cfg:
             if key in int_class:
                 setattr(self, key, int(self.cfg[key]))
@@ -571,8 +569,6 @@ class CustomDriver(DeepDriveMDDriver):
         os.makedirs(self.datasets_path, exist_ok=True)
         self.synd_model = self.load_synd_model()
         self.rng = np.random.default_rng()
-        self.ml_mode = "static"
-        self.static_chk_path = "checkpoint-epoch-25.pt"
 
     def get_data_for_objective(self, z: np.ndarray, pcoords: np.ndarray):
         if self.niter == 1:
@@ -657,12 +653,45 @@ class CustomDriver(DeepDriveMDDriver):
             )
         return seg_labels
     
+    def dbscan_cluster_segments(self, embedding_history: np.ndarray, pcoord_history: np.ndarray) -> np.ndarray:
+        # if self.niter == 1000 or self.niter == 1100 or self.niter == 1200 or self.niter == 1300 or self.niter == 1400:
+        #     for x in range(1, 41):
+        #         for y in range(1, 41):
+        #             clustering = DBSCAN(eps=y*.025, min_samples=x*5).fit(embedding_history)
+        #             plot_scatter(
+        #                 embedding_history,
+        #                 clustering.labels_,
+        #                 self.log_path / f"embedding-cluster-{self.niter}-min-{x*5}-eps-{y*.05}.png",
+        #             )
+        #             print(x*5, y*.05, len(set(clustering.labels_)), list(clustering.labels_).count(-1)/len(clustering.labels_))
+        
+        if self.niter > self.kmeans_iteration_history:
+            min_samples = 50
+        else:
+            min_samples = int(math.ceil(self.niter * 50 / self.kmeans_iteration_history))
+
+        # Perform the K-means clustering
+        clustering = DBSCAN(min_samples=min_samples, eps=1.5).fit(embedding_history)
+        
+        if self.niter % 10 == 0:
+            plot_scatter(
+                embedding_history,
+                clustering.labels_,
+                self.log_path / f"embedding-cluster-{self.niter}.png",
+            )
+            plot_scatter(
+                embedding_history,
+                pcoord_history,
+                self.log_path / f"embedding-pcoord-{self.niter}.png",
+            )
+        return clustering.labels_
+
     def optics_cluster_segments(self, embedding_history: np.ndarray, pcoord_history: np.ndarray) -> np.ndarray:
         # Load up to the old latent coordinates here
         if self.niter > self.kmeans_iteration_history:
-            min_samples = 100
+            min_samples = 135
         else:
-            min_samples = int(self.niter * 2) 
+            min_samples = int(math.ceil(self.niter * 1.35))
 
         # Perform the K-means clustering
         clustering = OPTICS(min_samples=min_samples).fit(embedding_history)
@@ -678,6 +707,8 @@ class CustomDriver(DeepDriveMDDriver):
                 pcoord_history,
                 self.log_path / f"embedding-pcoord-{self.niter}.png",
             )
+            
+            # exit()
         return clustering.labels_
     
     def plot_prev_data(self):
@@ -869,7 +900,10 @@ class CustomDriver(DeepDriveMDDriver):
                 z = self.machine_learning_method.predict(cur_dcoords, self.static_chk_path)
             
             embedding_history, pcoord_history = self.get_data_for_objective(z, pcoords)
-            all_labels = self.optics_cluster_segments(embedding_history, pcoord_history)
+            start = time.time()
+        
+            all_labels = self.dbscan_cluster_segments(embedding_history, pcoord_history)
+            print(f"Clustered for {time.time() - start} seconds")
             seg_labels = all_labels[-self.nsegs:]
 
 
