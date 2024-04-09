@@ -7,6 +7,8 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from natsort import natsorted
+import matplotlib as mpl
+mpl.use('Agg')
 import matplotlib.pyplot as plt
 from westpa.core.segment import Segment
 from scipy.sparse import coo_matrix
