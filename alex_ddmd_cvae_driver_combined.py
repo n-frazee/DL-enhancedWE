@@ -19,7 +19,6 @@ from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.cluster import KMeans, OPTICS, DBSCAN
 from os.path import expandvars
-import math
 
 import os
 from westpa_ddmd.config import BaseSettings, mkdir_validator
@@ -656,25 +655,28 @@ class CustomDriver(DeepDriveMDDriver):
             )
         return seg_labels
     
+    def dbscan_hp_sweep(self, embedding_history):
+        if self.niter == 1000 or self.niter == 1100 or self.niter == 1200 or self.niter == 1300 or self.niter == 1400:
+            for x in range(1, 41):
+                for y in range(1, 41):
+                    clustering = DBSCAN(eps=y*.025, min_samples=x*5).fit(embedding_history)
+                    plot_scatter(
+                        embedding_history,
+                        clustering.labels_,
+                        self.log_path / f"embedding-cluster-{self.niter}-min-{x*5}-eps-{y*.05}.png",
+                    )
+                    print(x*5, y*.05, len(set(clustering.labels_)), list(clustering.labels_).count(-1)/len(clustering.labels_))
+    
     def dbscan_cluster_segments(self, embedding_history: np.ndarray, pcoord_history: np.ndarray) -> np.ndarray:
-        # if self.niter == 1000 or self.niter == 1100 or self.niter == 1200 or self.niter == 1300 or self.niter == 1400:
-        #     for x in range(1, 41):
-        #         for y in range(1, 41):
-        #             clustering = DBSCAN(eps=y*.025, min_samples=x*5).fit(embedding_history)
-        #             plot_scatter(
-        #                 embedding_history,
-        #                 clustering.labels_,
-        #                 self.log_path / f"embedding-cluster-{self.niter}-min-{x*5}-eps-{y*.05}.png",
-        #             )
-        #             print(x*5, y*.05, len(set(clustering.labels_)), list(clustering.labels_).count(-1)/len(clustering.labels_))
+
         
         if self.niter > self.kmeans_iteration_history:
             min_samples = 50
         else:
-            min_samples = int(math.ceil(self.niter * 50 / self.kmeans_iteration_history))
+            min_samples = int(self.niter * 50 / self.kmeans_iteration_history) + 1
 
         # Perform the K-means clustering
-        clustering = DBSCAN(min_samples=min_samples, eps=1.5).fit(embedding_history)
+        clustering = DBSCAN(min_samples=min_samples, eps=1.25).fit(embedding_history)
         
         if self.niter % 10 == 0:
             plot_scatter(
@@ -694,7 +696,7 @@ class CustomDriver(DeepDriveMDDriver):
         if self.niter > self.kmeans_iteration_history:
             min_samples = 135
         else:
-            min_samples = int(math.ceil(self.niter * 1.35))
+            min_samples = int(self.niter * 1.35) + 1
 
         # Perform the K-means clustering
         clustering = OPTICS(min_samples=min_samples).fit(embedding_history)
@@ -841,6 +843,55 @@ class CustomDriver(DeepDriveMDDriver):
 
             self.machine_learning_method.train(all_coords)
     
+    def split_decider(self, cluster_df, split_dict, num_segs_for_splitting, num_resamples):
+        # All the possible combinations of numbers that sum up to the num_resamples_needed
+        combos = []
+        self.find_combinations(num_resamples, [], 1, combos)
+        # Need to check there's enough walkers to use that particular scheme
+        split_possible = []
+        for ind, x in enumerate(combos):
+            if len(x) <= num_segs_for_splitting:
+                split_possible.append(x)
+        # This is the chosen split motif for this cluster
+        chosen_splits = sorted(split_possible[self.rng.integers(len(split_possible))], reverse=True)
+        print(f'split choice: {chosen_splits}')
+        # Check if there are any outliers associated with this cluster
+        sorted_segs = cluster_df.inds.values
+        print(f"{sorted_segs=}")
+
+        # Add to the split_dict with each key corresponding to the index of the walker 
+        # and the value being the number of splits
+        for idx, n_splits in enumerate(chosen_splits):
+            split_dict[int(sorted_segs[idx])] = int(n_splits + 1)
+
+        print(f"{split_dict=}")
+
+    def merge_decider(self, cluster_df, merge_list, num_segs_for_merging, num_resamples):
+        # All the possible combinations of numbers that sum up to the num_resamples_needed
+        combos = []
+        self.find_combinations(num_resamples, [], 1, combos)
+        merges_possible = []
+        # Need to check there's enough walkers to use that particular merging scheme
+        for ind, x in enumerate(combos):
+            if np.sum(x + 1) <= num_segs_for_merging:
+                merges_possible.append(x + 1)
+
+        # print(f"{merges_possible=}")
+
+        # This is the chosen merge motif for this cluster
+        chosen_merge = sorted(list(merges_possible[self.rng.integers(len(merges_possible))]), reverse=True)
+        print(f'merge choice: {chosen_merge}')
+        #print(f"{cluster_df=}")
+        for n in chosen_merge:
+            rows = cluster_df.tail(n)
+            merge_group = list(rows.inds.values)
+            # Append the merge to the list of all merges
+            merge_list.append(merge_group)
+            print(f"{merge_group=}")
+            # Remove the sampled rows
+            cluster_df = cluster_df.drop(rows.index)
+        print(f"{merge_list=}")
+
     def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
         # Get data for sorting
         pcoords = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
@@ -968,12 +1019,7 @@ class CustomDriver(DeepDriveMDDriver):
         # print("After adjusting outliers")
         print(df)
         # Ideal number of walkers per cluster
-        segs_per_cluster = int(math.floor((len(df)) / len(cluster_ids)))
-
-        # if self.nsegs > 32:
-        #     segs_per_cluster = int(math.floor((len(df)) / len(cluster_ids)))
-        # else:
-        #     segs_per_cluster = int(math.ceil((len(df)) / len(cluster_ids)))
+        segs_per_cluster = int((len(df)) / len(cluster_ids))
 
         print(f"{segs_per_cluster=}")
         
@@ -987,15 +1033,29 @@ class CustomDriver(DeepDriveMDDriver):
             #print(f"{num_segs_in_cluster=}")
             if len(cluster_df) == segs_per_cluster: # correct number of walkers
                 print("Already the correct number of walkers!")
-                continue
+                # Remove walkers outside the thresholds
+                cluster_df = cluster_df[(cluster_df['weight'] > self.split_weight_limit)]
+                cluster_df = cluster_df[(cluster_df['weight'] < self.merge_weight_limit)].sort_values(["outlier", 'pcoord'], ascending=[False, True])
+                print(f"{cluster_df=}")
+                if len(cluster_df) < 3:
+                    print('Not enough walkers within the thresholds to split/merge in this cluster')
+                    continue
+                elif len(cluster_df) >= 12:
+                    # Split top 4 merge bottom 8
+                    num_resamples = 4
+                else:
+                    num_resamples = int(len(cluster_df) / 3)
+                
+                self.split_decider(cluster_df, split_dict, num_resamples, num_resamples)
+                self.merge_decider(cluster_df, merge_list, 2 * num_resamples, num_resamples)
+                
+
             else:
                 # Number of resamples needed to bring the cluster to the set number of walkers per cluster
                 num_resamples_needed = abs(num_segs_in_cluster - segs_per_cluster)
                 print(f"{num_resamples_needed=}")
 
-                # All the possible combinations of numbers that sum up to the num_resamples_needed
-                combos = []
-                self.find_combinations(num_resamples_needed, [], 1, combos)
+
 
                 if len(cluster_df) < segs_per_cluster: # need to split some walkers
                     # Display walkers under the weight threshold
@@ -1015,25 +1075,7 @@ class CustomDriver(DeepDriveMDDriver):
                         split_dict = None
                         break
                     else: # Splitting can happen!
-                        # Need to check there's enough walkers to use that particular merging scheme
-                        split_possible = []
-                        for ind, x in enumerate(combos):
-                            if len(x) <= num_segs_for_splitting:
-                                split_possible.append(x)
-                        # This is the chosen split motif for this cluster
-                        chosen_splits = sorted(split_possible[self.rng.integers(len(split_possible))], reverse=True)
-                        print(f'split choice: {chosen_splits}')
-                        # Check if there are any outliers associated with this cluster
-
-                        sorted_segs = cluster_df.inds.values
-                        print(f"{sorted_segs=}")
-
-                        # Add to the split_dict with each key corresponding to the index of the walker 
-                        # and the value being the number of splits
-                        for idx, n_splits in enumerate(chosen_splits):
-                            split_dict[int(sorted_segs[idx])] = int(n_splits + 1)
-
-                        print(f"{split_dict=}")
+                        self.split_decider(cluster_df, split_dict, len(cluster_df), num_resamples_needed)
 
                 else: # need to merge some walkers
                     # Find the walkers with too much weight
@@ -1051,27 +1093,7 @@ class CustomDriver(DeepDriveMDDriver):
                         merge_list = None
                         break
                     else: # Merging gets to happen!
-                        merges_possible = []
-                        # Need to check there's enough walkers to use that particular merging scheme
-                        for ind, x in enumerate(combos):
-                            if np.sum(x + 1) <= num_segs_for_merging:
-                                merges_possible.append(x + 1)
-
-                        # print(f"{merges_possible=}")
-
-                        # This is the chosen merge motif for this cluster
-                        chosen_merge = sorted(list(merges_possible[self.rng.integers(len(merges_possible))]), reverse=True)
-                        print(f'merge choice: {chosen_merge}')
-                        #print(f"{cluster_df=}")
-                        for n in chosen_merge:
-                            rows = cluster_df.tail(n)
-                            merge_group = list(rows.inds.values)
-                            # Append the merge to the list of all merges
-                            merge_list.append(merge_group)
-                            print(f"{merge_group=}")
-                            # Remove the sampled rows
-                            cluster_df = cluster_df.drop(rows.index)
-                        print(f"{merge_list=}")
+                        self.merge_decider(cluster_df, merge_list, num_segs_for_merging, num_resamples_needed)
 
         if self.ml_mode != "ablation":
 
