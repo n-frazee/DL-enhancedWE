@@ -89,7 +89,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         self, bin: Bin, segments: Sequence[Segment], split_dict: dict
     ) -> None:
         for ind in split_dict:
-            segment = segments[ind]
+            segment = segments[int(ind)]
             bin.remove(segment)
             new_segments_list = self._split_walker(segment, split_dict[ind], bin)
             bin.update(new_segments_list)
@@ -109,8 +109,11 @@ class DeepDriveMDDriver(WEDriver, ABC):
         return split_dict
     
     def add_merge(self, merge_list: List, merge_inds: List):
+        # Flatten out the merge_list
+        current_merges = [y for x in merge_list for y in x]
         # Check if the indices are in use already
-        ind_in_use = np.array([np.any(np.array(merge_list) == ind) for ind in merge_inds])
+        ind_in_use = np.array([ind in current_merges for ind in merge_inds])
+        print(f"{ind_in_use=}")
         # If at least one ind is already in use
         if ind_in_use.sum() != 0:    
             # Check if exactly that merge is already happening
@@ -121,9 +124,10 @@ class DeepDriveMDDriver(WEDriver, ABC):
                 if not np.all(ind_in_use):
                     # Find the inds that need to be added in the merge
                     inds_to_add_on = np.array(merge_inds)[np.logical_not(ind_in_use)]
-                    merges_to_join = [list(inds_to_add_on)]
+                    merges_to_join = [inds_to_add_on.tolist()]
                 else:
                     merges_to_join = []
+                print(f"{merges_to_join=}")
                 # Loop through existing merges
                 for merge_group in merge_list:
                     # Loop through new merge inds
@@ -134,40 +138,49 @@ class DeepDriveMDDriver(WEDriver, ABC):
                             merges_to_join.append(list(merge_group))
                             # Remove the group from the merge_list
                             merge_list.remove(merge_group)
+                            print(f"{merges_to_join=}")
                             break
                 # Add all of the elements of the lists in merges_to_join into a single list
                 merge_list.append([y for x in merges_to_join for y in x])
         else: # None of the indices are in use
             merge_list.append(merge_inds)
 
+        print(f"{merge_list=}")
         return merge_list
     
     def _split_by_weight(self, cluster_df, ideal_segs_per_cluster, split_dict):
         '''Split overweight particles'''
 
         ideal_weight = cluster_df['weight'].sum() / ideal_segs_per_cluster
+        print(f"{ideal_weight=}")
+
         to_split = cluster_df[cluster_df['weight'] > self.weight_split_threshold*ideal_weight]
+        print(f"{to_split=}")
 
-        for _, row in to_split.iterrows():
-            split_ind = str(row['ind'])
+        for ind, row in to_split.iterrows():
+            # Find the ind for the row to be split
+            split_ind = str(row['inds'])
+            # Determine the number of necessary splits to add
             m = int(row['weight'] / ideal_weight)
+            row['weight'] /= m + 1
+            # Update the split dict
             split_dict = self.add_split(split_dict, split_ind, m)
-            cluster_df.loc[len(cluster_df)] = row
-            print(f"{split_dict=}")
-            print(f"{cluster_df=}")
-
-
+            cluster_df.loc[ind] = row
+            # Add a new entry for every split
+            for _ in range(m):
+                cluster_df.loc[len(cluster_df)] = row
+        print(f"After split{cluster_df=}")
         return cluster_df, split_dict
     
     def _merge_by_weight(self, cluster_df, ideal_segs_per_cluster, merge_list):
         '''Merge underweight particles'''
 
         # Ideal weight for this cluster
-        ideal_weight = cluster_df['weights'].sum() / ideal_segs_per_cluster
-
+        ideal_weight = cluster_df['weight'].sum() / ideal_segs_per_cluster
+        print(f"{ideal_weight=}")
         while True:
             # Sort the df by weight
-            cluster_df.sort_values('weights', inplace=True)
+            cluster_df.sort_values('weight', inplace=True)
             # Add up all of the weights
             cumul_weight = np.add.accumulate(cluster_df['weight'])
             # Get the walkers that add up to be under the ideal weight
@@ -177,7 +190,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
                 return cluster_df, merge_list
             
             # Add the indices to be merged
-            merge_list = self.add_merge(merge_list, to_merge.inds.values)
+            merge_list = self.add_merge(merge_list, list(to_merge.inds.values))
             print(f"{merge_list=}")
             # Remove the merged walkers
             cluster_df.drop(to_merge.index.values, inplace=True)
@@ -187,9 +200,9 @@ class DeepDriveMDDriver(WEDriver, ABC):
             cluster_df.loc[len(cluster_df)] = self.determine_merge_survivor(to_merge)
             print(f"{cluster_df=}")
 
-
     def determine_merge_survivor(self, to_merge: pd.DataFrame):
         """Determines which walker will survive the merge"""
+        to_merge.reset_index(drop=True, inplace=True)
         # Sum of the weight of all walkers being merged
         sum_weights = np.sum(to_merge['weight'])
         # Normalized the weights to sum to 1
@@ -198,6 +211,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         select = np.random.choice(len(to_merge), p=norm_weights)
         # Set the new weight to the sum of the seights
         to_merge.at[select, 'weight'] = sum_weights 
+        print(f"{to_merge=}")
         # Return the selected row 
         return to_merge.loc[select]
     
@@ -441,7 +455,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
                 # print(segments)
                 # print(cur_segments)
                 self.cur_pcoords = self.get_pcoords(cur_segments)
-                
+
                 # TODO: Is there a way to get nsegs and nframes without pcoords?
                 # If so, we could save on a lookup. Can we retrive it from cur_segments?
                 self.niter = cur_segments[0].n_iter
@@ -668,10 +682,6 @@ class CustomDriver(DeepDriveMDDriver):
         os.makedirs(self.datasets_path, exist_ok=True)
         self.synd_model = self.load_synd_model()
         self.rng = np.random.default_rng()
-        # Dictionary that maps the index of segments to the number of splits they need
-        self.split_dict = {}
-        # List that contains lists of indices of segments that will be merged together
-        self.merge_list = []
 
     def get_data_for_objective(self, z: np.ndarray, pcoords: np.ndarray):
         if self.niter == 1:
@@ -939,7 +949,7 @@ class CustomDriver(DeepDriveMDDriver):
 
             self.machine_learning_method.train(all_coords)
     
-    def split_decider(self, cluster_df, num_segs_for_splitting, num_resamples):
+    def split_decider(self, cluster_df, split_dict, num_segs_for_splitting, num_resamples):
         # All the possible combinations of numbers that sum up to the num_resamples_needed
         combos = []
         self.find_combinations(num_resamples, [], 1, combos)
@@ -958,11 +968,12 @@ class CustomDriver(DeepDriveMDDriver):
         # Add to the split_dict with each key corresponding to the index of the walker 
         # and the value being the number of splits
         for idx, n_splits in enumerate(chosen_splits):
-            self.split_dict[int(sorted_segs[idx])] = int(n_splits + 1)
+            split_dict[int(sorted_segs[idx])] = int(n_splits + 1)
 
-        print(f"{self.split_dict=}")
+        print(f"{split_dict=}")
+        return split_dict
 
-    def merge_decider(self, cluster_df, num_segs_for_merging, num_resamples):
+    def merge_decider(self, cluster_df, merge_list, num_segs_for_merging, num_resamples):
         # All the possible combinations of numbers that sum up to the num_resamples_needed
         combos = []
         self.find_combinations(num_resamples, [], 1, combos)
@@ -979,11 +990,13 @@ class CustomDriver(DeepDriveMDDriver):
             rows = cluster_df.tail(n)
             merge_group = list(rows.inds.values)
             # Append the merge to the list of all merges
-            self.merge_list.append(merge_group)
+            merge_list.append(merge_group)
             print(f"{merge_group=}")
             # Remove the sampled rows
             cluster_df = cluster_df.drop(rows.index)
-        print(f"{self.merge_list=}")
+        print(f"{merge_list=}")
+
+        return merge_list
 
     def run(self, cur_segments: Sequence[Segment], next_segments) -> None:
         # Get data for sorting
@@ -1091,7 +1104,10 @@ class CustomDriver(DeepDriveMDDriver):
         print(df)
         # Ideal number of walkers per cluster
         ideal_segs_per_cluster = int((len(df)) / len(cluster_ids))
-
+        # Dictionary that maps the index of segments to the number of splits they need
+        split_dict = {}
+        # List that contains lists of indices of segments that will be merged together
+        merge_list = []
         print(f"{ideal_segs_per_cluster=}")
         
         for id in cluster_ids:
@@ -1103,9 +1119,9 @@ class CustomDriver(DeepDriveMDDriver):
             num_segs_in_cluster = len(cluster_df)
 
             # Ideal weight splits + merges
-            cluster_df, self.split_dict = self._split_by_weight(cluster_df, ideal_segs_per_cluster, self.split_dict)
+            cluster_df, split_dict = self._split_by_weight(cluster_df, ideal_segs_per_cluster, split_dict)
             print(f"{cluster_df=}")
-            cluster_df, self.merge_list = self._merge_by_weight(cluster_df, ideal_segs_per_cluster, self.merge_list)
+            cluster_df, merge_list = self._merge_by_weight(cluster_df, ideal_segs_per_cluster, merge_list)
             print(f"{cluster_df=}")
 
             # if num_segs_in_cluster == ideal_segs_per_cluster: # correct number of walkers
@@ -1149,7 +1165,7 @@ class CustomDriver(DeepDriveMDDriver):
             #         # Test if there are enough walkers with sufficient weight to split
             #         if num_segs_for_splitting == 0:
             #             print(f"Walkers up for splitting have weights that are too small. Skipping split/merge on iteration {self.niter}...")
-            #             self.split_dict = None
+            #             split_dict = None
             #             break
             #         else: # Splitting can happen!
             #             self.split_decider(cluster_df, num_segs_in_cluster, num_resamples_needed)
@@ -1169,7 +1185,7 @@ class CustomDriver(DeepDriveMDDriver):
             #         # Need a minimum number of walkers for merging
             #         if num_segs_for_merging < num_segs_in_cluster - ideal_segs_per_cluster + 1:
             #             print(f"Walkers up for merging have weights that are too large. Skipping split/merge on iteration {self.niter}...")
-            #             self.merge_list = None
+            #             merge_list = None
             #             break
             #         else: # Merging gets to happen!
             #             self.merge_decider(cluster_df, num_segs_for_merging, num_resamples_needed)
@@ -1189,5 +1205,5 @@ class CustomDriver(DeepDriveMDDriver):
             )
             np.save(self.datasets_path / f"pcoord-{self.niter}.npy", pcoords)
 
-        return self.split_dict, self.merge_list
+        return split_dict, merge_list
 
