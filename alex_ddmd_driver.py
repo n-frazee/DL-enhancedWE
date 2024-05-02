@@ -1,42 +1,41 @@
 import logging
-from pathlib import Path
-from abc import ABC, abstractmethod
-from typing import Sequence, Tuple, Optional, List, Dict, Any, Generator, Union
+import os
+import operator
 import time
+import mdtraj
+import westpa
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
-from natsort import natsorted
 import matplotlib as mpl
-mpl.use('Agg')
 import matplotlib.pyplot as plt
-from westpa.core.segment import Segment
+
+from os.path import expandvars
+from pathlib import Path
+from abc import ABC, abstractmethod
+from typing import Sequence, Tuple, Optional, List, Dict, Any, Generator, Union
+from natsort import natsorted
+
 from scipy.sparse import coo_matrix
 from scipy.spatial import distance_matrix
 from scipy.spatial.distance import cdist
-from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
-import mdtraj
+
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.mixture import BayesianGaussianMixture
-from os.path import expandvars
 
-import os
-from westpa_ddmd.config import BaseSettings
-import operator
-
-import westpa
 from westpa.core.binning import Bin
 from westpa.core.we_driver import WEDriver
 from westpa.core.h5io import tostr
+from westpa.core.segment import Segment
 
+from westpa_ddmd.config import BaseSettings
+from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
+from nani import KmeansNANI, compute_scores, extended_comparison
+
+mpl.use('Agg')
 log = logging.getLogger(__name__)
 
-# TODO: This is a temporary solution until we can pass
-# arguments through the westpa config. Requires a
-# deepdrivemd.yaml file in the same directory as this script
-CONFIG_PATH = Path(__file__).parent / "deepdrivemd.yaml"
-SIM_ROOT_PATH = Path(__file__).parent
 
 class DeepDriveMDDriver(WEDriver, ABC):
     def _process_args(self):
@@ -666,8 +665,6 @@ class MachineLearningMethod:
         self.base_training_data_path = base_training_data_path
         self.static_chk_path = static_chk_path
         self.contact_cutoff = contact_cutoff
-        # Load the configuration
-        #self.cfg = ExperimentSettings.from_yaml(CONFIG_PATH)
 
         # Initialize the model
         self.autoencoder = SymmetricConv2dVAETrainer(**CVAESettings().model_dump())
@@ -781,10 +778,37 @@ class CustomDriver(DeepDriveMDDriver):
 
         return synd_model
 
+    def _process_mdance_args(self):
+        float_class = []
+        int_class = ['sieve', 'n_structures', 'percentage']
+                 
+        self.cfg = westpa.rc.config.get(['west', 'mdance'], {})
+        self.cfg.update({})
+        
+        if 'n_clusters' in self.cfg:
+            temp = self.cfg['n_clusters']
+            if isinstance(temp, str):
+                from ast import literal_eval
+
+                self.cfg['n_clusters'] = literal_eval(temp)
+                del temp
+
+        if 'percentage' not in self.cfg:
+            self.cfg.update({'percentage': 10})
+
+        for key in self.cfg:
+            if key in int_class:
+                setattr(self, key, int(self.cfg[key]))
+            elif key in float_class:
+                setattr(self, key, float(self.cfg[key]))
+            else:
+                setattr(self, key, self.cfg[key])
+
     def __init__(self, rc=None, system=None):
         super().__init__(rc, system)
 
         self._process_args()
+        self._process_mdance_args()
 
         self.base_training_data_path = expandvars('$WEST_SIM_ROOT/common_files/train.npy')
 
@@ -879,7 +903,91 @@ class CustomDriver(DeepDriveMDDriver):
         # Add the cluster labels to the DataFrame
         df["ls_cluster"] = seg_labels
         return df
-    
+
+    def knani_scan_cluster_segments(self, embedding_history, pcoord_history: np.ndarray) -> np.ndarray:
+        # Perform the K-means clustering
+        all_scores, all_models = [], []
+
+        if self.init_type in ['comp_sim', 'div_select']:
+            model = KmeansNANI(data=embedding_history, n_clusters=self.n_clusters[1], metric=self.metric, init_type=self.init_type, percentage=self.percentage)
+            initiators = model.initiate_kmeans() 
+
+        for i_cluster in range(self.n_clusters[0], self.n_clusters[1]+1):
+            total = 0
+
+            model = KmeansNANI(data=embedding_history, n_clusters=i_cluster, metric=self.metric, init_type=self.init_type, percentage=self.percentage)
+            if self.init_type == 'vanilla_kmeans++':
+                initiators = model.initiate_kmeans()
+            elif self.init_type in ['comp_sim', 'div_select']:
+                pass
+            else:  # For k-means++, random
+                initiators = self.init_type
+            labels, centers, n_iter = model.kmeans_clustering(initiators=initiators)
+
+            all_models.append([labels, centers])
+            ch_score, db_score = compute_scores(embedding_history, labels=labels)
+
+            dictionary = {}
+            for j in range(i_cluster):
+                dictionary[j] = embedding_history[np.where(labels == j)[0]]
+            for val in dictionary.values():
+                total += extended_comparison(np.asarray(val), traj_numpy_type='full', metric=self.metric)
+
+            all_scores.append((i_cluster, n_iter, ch_score, db_score, total/i_cluster))
+
+
+        all_scores = np.array(all_scores)
+
+        if self.db_second:
+            print(f'using second derivative of DBI to find optimal N')
+            all_db = all_scores[:, 3]
+            result = np.zeros((len(all_scores)-2, 2))
+
+            for idx, i_cluster in enumerate(all_scores[1:-1, 0]):
+                # Calculate the second derivative
+                result[idx] =  [i_cluster, all_db[idx] + all_db[idx+2] - (2*all_db[idx+1])]
+
+            chosen_idx = np.argmax(result[:,1])+1
+            chosen_k = result[chosen_idx-1, 0]
+        else:  # Pick only by using the lowest DBI
+            chosen_idx = np.argmin(all_scores[:, 3])
+            chosen_k = all_scores[chosen_idx, 0]
+
+        header = f'init_type: {self.init_type}, percentage: {self.percentage}, metric: {self.metric}'
+        header += 'Number of Clusters, Number of Iterations, Calinski-Harabasz score, Davies-Bouldin score, Average MSD'
+        np.savetxt(self.log_path / f"{self.niter}-{self.percentage}{self.init_type}_summary.csv", all_scores, delimiter=',', header=header, fmt='%s')
+
+        if self.niter % 10 == 0:
+            plot_scatter(
+                embedding_history,
+                all_models[chosen_idx][0],
+                self.log_path / f"embedding-cluster-{self.niter}.png",
+            )
+            plot_scatter(
+                embedding_history,
+                pcoord_history,
+                self.log_path / f"embedding-pcoord-{self.niter}.png",
+            )
+        return all_models[chosen_idx][0], int(chosen_k)
+
+    def knani_cluster_segments(self, embedding_history, pcoord_history: np.ndarray) -> np.ndarray:
+        # Perform the K-means clustering
+        NANI_labels, NANI_centers, NANI_n_iter = KmeansNANI(data=embedding_history, n_clusters=self.n_clusters, metric=self.metric, init_type=self.init_type, percentage=self.percentage).execute_kmeans_all()
+        
+        if self.niter % 10 == 0:
+            plot_scatter(
+                embedding_history,
+                NANI_labels,
+                self.log_path / f"embedding-cluster-{self.niter}.png",
+            )
+            plot_scatter(
+                embedding_history,
+                pcoord_history,
+                self.log_path / f"embedding-pcoord-{self.niter}.png",
+            )
+        return NANI_labels
+
+
     def dbscan_cluster_segments(self, df: pd.DataFrame, cluster_z: np.ndarray) -> pd.DataFrame:
         """
         Cluster the segments using DBSCAN algorithm and assign cluster labels to the DataFrame.
@@ -1549,6 +1657,19 @@ class CustomDriver(DeepDriveMDDriver):
         elif self.ml_mode == 'ablation':
             seg_labels = [self.rng.integers(8) for _ in range(self.nsegs)]
             df["ls_cluster"] = seg_labels
+
+        # TODO: THIS IS OLD.
+        embedding_history, pcoord_history = self.get_data_for_objective(z, pcoords)
+        if self.knani:
+            if isinstance(self.n_clusters, tuple):
+                all_labels, output_n_clusters = self.knani_scan_cluster_segments(embedding_history, pcoord_history)
+                print(f'scanned {self.n_clusters} and used {output_n_clusters}')
+            else:
+                all_labels = self.knani_cluster_segments(embedding_history, pcoord_history)
+                print(f"running k-nani with {self.n_clusters}")
+        else:
+            all_labels = self.optics_cluster_segments(embedding_history, pcoord_history)
+            print("running optics")
 
         # Set of all the cluster ids
         cluster_ids = sorted(set(df.ls_cluster.values))
