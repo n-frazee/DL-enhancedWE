@@ -628,39 +628,6 @@ def find_combinations(target, current_combination, start, combo_list):
         # Add the number to the current combination
         find_combinations(target - i, current_combination + [i], i, combo_list)
 
-
-# class ExperimentSettings(BaseSettings):
-#     output_path: Path
-#     """Output directory for the run."""
-#     update_interval: int
-#     """How often to update the model. Set to 0 for static."""
-#     lag_iterations: int
-#     """Number of lagging iterations to use for training data."""
-#     lof_n_neighbors: int
-#     """Number of neigbors to use for local outlier factor."""
-#     lof_iteration_history: int
-#     """Number of iterations to look back at for local outlier factor."""
-#     ml_mode: str
-#     """static, ablation, train"""
-#     static_chk_path: Optional[Path]
-#     """Checkpoint file for static."""
-#     target_point: Optional[Path]
-#     """Path to target point in latent space"""
-#     split_weight_limit: float
-#     """Lower limit on walker weight. If all of the walkers in 
-#     num_trial_splits are below the limit, split/merge is skipped
-#     that iteration"""
-#     merge_weight_limit: float
-#     """Upper limit on walker weight. If all of the walkers in 
-#     num_trial_splits exceed limit, split/merge is skipped
-#     that iteration"""
-#     # TODO: Add validator for this num_trial_splits condition
-#     contact_cutoff: float = 8.0
-#     """The Angstrom cutoff for contact map generation."""
-
-#     # validators
-#     _mkdir_output_path = mkdir_validator("output_path")
-
 class CVAESettings(BaseSettings):
     """Settings for mdlearn SymmetricConv2dVAETrainer object."""
 
@@ -1570,16 +1537,16 @@ class CustomDriver(DeepDriveMDDriver):
                 # Add the distance column
                 df["distance"] = [cosine_distance(z, self.target_point) for z in seg_z]
             
-            # Cluster the segments
-            if self.cluster_method == 'kmeans':
-                df = self.kmeans_cluster_segments(cluster_z)
-            elif self.cluster_method == 'dbscan':
-                df = self.dbscan_cluster_segments(df, cluster_z)
-            elif self.cluster_method == 'optics':
-                df = self.optics_cluster_segments(cluster_z, pcoords)
-
-        else: # no ML of any kind
-            print("Ablation")
+        # Cluster the segments
+        if self.cluster_method == 'kmeans':
+            df = self.kmeans_cluster_segments(df, cluster_z)
+        elif self.cluster_method == 'dbscan':
+            df = self.dbscan_cluster_segments(df, cluster_z)
+        elif self.cluster_method == 'optics':
+            df = self.optics_cluster_segments(df, cluster_z)
+        elif self.cluster_method == 'gmm':
+            df = self.gmm_cluster_segments(df, cluster_z)
+        elif self.ml_mode == 'ablation':
             seg_labels = [self.rng.integers(8) for _ in range(self.nsegs)]
             df["ls_cluster"] = seg_labels
 
