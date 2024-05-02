@@ -15,13 +15,14 @@ from scipy.sparse import coo_matrix
 from scipy.spatial import distance_matrix
 from scipy.spatial.distance import cdist
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
-
+import mdtraj
 from sklearn.neighbors import LocalOutlierFactor
-from sklearn.cluster import KMeans, OPTICS, DBSCAN
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.mixture import BayesianGaussianMixture
 from os.path import expandvars
 
 import os
-from westpa_ddmd.config import BaseSettings, mkdir_validator
+from westpa_ddmd.config import BaseSettings
 import operator
 
 import westpa
@@ -39,9 +40,11 @@ SIM_ROOT_PATH = Path(__file__).parent
 
 class DeepDriveMDDriver(WEDriver, ABC):
     def _process_args(self):
-        float_class = ['split_weight_limit', 'merge_weight_limit', 'dbscan_epsilon']
+        float_class = ['split_weight_limit', 'merge_weight_limit', 
+                       'dbscan_epsilon', 'contact_cutoff']
         int_class = ['update_interval', 'lag_iterations', 'kmeans_clusters',
-                     'max_save_per_cluster', 'dbscan_min_samples']
+                     'max_save_per_cluster', 'dbscan_min_samples',
+                     'gmm_max_components']
                  
         self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
         self.cfg.update({'train_path': None, 'machine_learning_method': None})
@@ -502,6 +505,7 @@ def plot_scatter(
                             data[num_segs:, 2], 
                             # Color the points gray
                             c="gray",
+                            label="Past iterations",
             )
         else:
             if log_scale:
@@ -510,6 +514,7 @@ def plot_scatter(
                             data[num_segs:, 2], 
                             c=color[num_segs:],
                             norm=mpl.colors.LogNorm(vmin=min_color, vmax=max_color), 
+                            label="Past iterations",
                 )
             else:   
                 hist = ax.scatter(data[num_segs:, 0], 
@@ -518,6 +523,7 @@ def plot_scatter(
                                 c=color[num_segs:],
                                 vmin=min_color,
                                 vmax=max_color,
+                                label="Past iterations",
                 )
             
             set_color = True
@@ -531,7 +537,8 @@ def plot_scatter(
                 marker="s",
                 # Make the points larger
                 s=150,
-                norm=mpl.colors.LogNorm(vmin=min_color, vmax=max_color), 
+                norm=mpl.colors.LogNorm(vmin=min_color, vmax=max_color),
+                label="Current iteration", 
             )
         else:
             cur = ax.scatter(
@@ -545,12 +552,13 @@ def plot_scatter(
                 s=150,
                 vmin=min_color,
                 vmax=max_color, 
+                label="Current iteration",
             )
     else:   
         cur = ax.scatter(data[:, 0], data[:, 1], data[:, 2], c=color)
 
     if target_point is not None:
-        ax.scatter(target_point[0], target_point[1], target_point[2], c="red", marker="x", s=200)
+        ax.scatter(target_point[0], target_point[1], target_point[2], c="red", marker="x", s=200, label="Target point")
 
     if set_color:
         colorby = hist
@@ -563,6 +571,7 @@ def plot_scatter(
 
     if title is not None:
         plt.title(title, loc="left")
+    ax.legend(loc='upper left')
     plt.savefig(output_path)
 
 def cosine_distance(v1: np.ndarray, v2: np.ndarray) -> float:
@@ -619,37 +628,38 @@ def find_combinations(target, current_combination, start, combo_list):
         # Add the number to the current combination
         find_combinations(target - i, current_combination + [i], i, combo_list)
 
-class ExperimentSettings(BaseSettings):
-    output_path: Path
-    """Output directory for the run."""
-    update_interval: int
-    """How often to update the model. Set to 0 for static."""
-    lag_iterations: int
-    """Number of lagging iterations to use for training data."""
-    lof_n_neighbors: int
-    """Number of neigbors to use for local outlier factor."""
-    lof_iteration_history: int
-    """Number of iterations to look back at for local outlier factor."""
-    ml_mode: str
-    """static, ablation, train"""
-    static_chk_path: Optional[Path]
-    """Checkpoint file for static."""
-    target_point: Optional[Path]
-    """Path to target point in latent space"""
-    split_weight_limit: float
-    """Lower limit on walker weight. If all of the walkers in 
-    num_trial_splits are below the limit, split/merge is skipped
-    that iteration"""
-    merge_weight_limit: float
-    """Upper limit on walker weight. If all of the walkers in 
-    num_trial_splits exceed limit, split/merge is skipped
-    that iteration"""
-    # TODO: Add validator for this num_trial_splits condition
-    contact_cutoff: float = 8.0
-    """The Angstrom cutoff for contact map generation."""
 
-    # validators
-    _mkdir_output_path = mkdir_validator("output_path")
+# class ExperimentSettings(BaseSettings):
+#     output_path: Path
+#     """Output directory for the run."""
+#     update_interval: int
+#     """How often to update the model. Set to 0 for static."""
+#     lag_iterations: int
+#     """Number of lagging iterations to use for training data."""
+#     lof_n_neighbors: int
+#     """Number of neigbors to use for local outlier factor."""
+#     lof_iteration_history: int
+#     """Number of iterations to look back at for local outlier factor."""
+#     ml_mode: str
+#     """static, ablation, train"""
+#     static_chk_path: Optional[Path]
+#     """Checkpoint file for static."""
+#     target_point: Optional[Path]
+#     """Path to target point in latent space"""
+#     split_weight_limit: float
+#     """Lower limit on walker weight. If all of the walkers in 
+#     num_trial_splits are below the limit, split/merge is skipped
+#     that iteration"""
+#     merge_weight_limit: float
+#     """Upper limit on walker weight. If all of the walkers in 
+#     num_trial_splits exceed limit, split/merge is skipped
+#     that iteration"""
+#     # TODO: Add validator for this num_trial_splits condition
+#     contact_cutoff: float = 8.0
+#     """The Angstrom cutoff for contact map generation."""
+
+#     # validators
+#     _mkdir_output_path = mkdir_validator("output_path")
 
 class CVAESettings(BaseSettings):
     """Settings for mdlearn SymmetricConv2dVAETrainer object."""
@@ -675,7 +685,7 @@ class CVAESettings(BaseSettings):
     plot_method: Optional[str] = "raw"
 
 class MachineLearningMethod:
-    def __init__(self, train_path: Path, base_training_data_path: Path) -> None:
+    def __init__(self, train_path: Path, base_training_data_path: Path, static_chk_path: Path, contact_cutoff: float) -> None:
         """Initialize the machine learning method.
 
         Parameters
@@ -687,12 +697,24 @@ class MachineLearningMethod:
         """
         self.train_path = train_path
         self.base_training_data_path = base_training_data_path
-
+        self.static_chk_path = static_chk_path
+        self.contact_cutoff = contact_cutoff
         # Load the configuration
         #self.cfg = ExperimentSettings.from_yaml(CONFIG_PATH)
 
         # Initialize the model
-        self.autoencoder = SymmetricConv2dVAETrainer(**CVAESettings().dict())
+        self.autoencoder = SymmetricConv2dVAETrainer(**CVAESettings().model_dump())
+
+    def get_target_point_coords(self, target_point_path: Path) -> np.ndarray:
+        """Get the xyz coordinates for the CA atoms of the target point."""
+        # Load the target point pdb in mdtraj
+        target_point = mdtraj.load(str(target_point_path))
+        # Select the CA atoms
+        ca_atoms = target_point.top.select("name CA")
+        # Get the xyz coordinates for the CA atoms
+        coords = target_point.xyz[0][ca_atoms]
+        # Reshape the coordinates to the shape (frames, atoms, atoms)
+        return np.reshape(coords, (1, len(ca_atoms), 3))
 
     def compute_sparse_contact_map(self, coords: np.ndarray) -> np.ndarray:
         """Compute the sparse contact maps for a set of coordinate frames."""
@@ -746,23 +768,33 @@ class MachineLearningMethod:
         )
         np.save(self.train_path / "z.npy", z[len(base_coords):])
 
-    def predict(self, coords: np.ndarray, static_chk_path=None) -> np.ndarray:
+    def predict(self, coords: np.ndarray) -> np.ndarray:
         """Predict the latent space coordinates for a set of coordinate frames."""
         # Concatenate the coords from all the frames (frames, atoms, atoms)
         # coords = np.concatenate(coords)
         # Compute the contact maps
         contact_maps = self.compute_sparse_contact_map(coords)
         # Predict the latent space coordinates
-        if static_chk_path is not None:
+        if self.static_chk_path is not None:
             z, *_ = self.autoencoder.predict(
-                contact_maps, checkpoint=static_chk_path
+                contact_maps, checkpoint=self.static_chk_path
             )
         else:
             z, *_ = self.autoencoder.predict(
                 contact_maps, checkpoint=self.most_recent_checkpoint_path
             )  
-
         return z
+    
+    def get_target_point_rep(self, target_point_path: Path) -> np.ndarray:
+        """Get the target point representation."""
+        # Load the target point coordinates
+        target_point = self.get_target_point_coords(target_point_path)
+        # Won't normally need these two lines
+        distance_matrices = [distance_matrix(frame, frame) for frame in target_point]
+        contact_maps = np.array(distance_matrices) < self.contact_cutoff
+        # Predict the target point representation
+        target_point_rep = self.predict(contact_maps)
+        return np.concatenate(target_point_rep)
 
 class CustomDriver(DeepDriveMDDriver):
     def load_synd_model(self):
@@ -795,8 +827,7 @@ class CustomDriver(DeepDriveMDDriver):
         os.makedirs(self.datasets_path, exist_ok=True)
         self.synd_model = self.load_synd_model()
         self.rng = np.random.default_rng()
-        if self.target_point_path is not None:
-            self.target_point = np.load(self.target_point_path)
+        self.sort_df = self.sort_df_for_density
             
     def lof_function(self, z: np.ndarray) -> np.ndarray:
         # Load up to the last 50 of all the latent coordinates here
@@ -826,76 +857,196 @@ class CustomDriver(DeepDriveMDDriver):
 
         return nof_per_segment
 
-    def cluster_segments(self, z: np.ndarray, pcoords: np.ndarray) -> np.ndarray:
-        # Load up to the old latent coordinates here
-        embedding_history, pcoord_history = self.get_data_for_objective(z, pcoords)
-
+    def plot_latent_space(self, cluster_z: np.ndarray, cluster_labels: np.ndarray, cluster_pcoords: np.ndarray, cluster_weights: np.ndarray) -> None:
+        plot_scatter(
+            cluster_z,
+            cluster_labels,
+            self.log_path / f"embedding-cluster-{self.niter}.png",
+            title=f"iter: {self.niter}",
+            cb_label="cluster ID",
+            num_segs=self.nsegs,
+            target_point=self.target_point if self.target_point is not None else None,
+        )
+        plot_scatter(
+            cluster_z,
+            cluster_pcoords,
+            self.log_path / f"embedding-pcoord-{self.niter}.png",
+            title=f"iter: {self.niter}",
+            cb_label="rmsd to target",
+            num_segs=self.nsegs,
+            target_point=self.target_point if self.target_point is not None else None,
+            min_max_color=(0, 14),
+        )
+        plot_scatter(
+            cluster_z,
+            np.array([cosine_distance(z, self.target_point) for z in cluster_z]),
+            self.log_path / f"embedding-distance-{self.niter}.png",
+            title=f"iter: {self.niter}",
+            cb_label="latent space distance to target",
+            num_segs=self.nsegs,
+            target_point=self.target_point if self.target_point is not None else None,
+            min_max_color=(0, 2),
+        )
+        plot_scatter(
+            cluster_z,
+            cluster_weights,
+            self.log_path / f"embedding-weight-{self.niter}.png",
+            title=f"iter: {self.niter}",
+            cb_label="weight",
+            num_segs=self.nsegs,
+            target_point=self.target_point if self.target_point is not None else None,
+            min_max_color=(self.split_weight_limit, self.merge_weight_limit),
+            log_scale=True,
+        )
+    
+    def kmeans_cluster_segments(self, df: pd.DataFrame, cluster_z: np.ndarray) -> pd.DataFrame:
         # Perform the K-means clustering
-        kmeans = KMeans(n_clusters=self.kmeans_clusters).fit(embedding_history)
-        seg_labels = kmeans.labels_[-len(z):]
+        cluster_labels = KMeans(n_clusters=self.kmeans_clusters).fit(cluster_z).labels_
+        # Save the cluster context data
+        self.save_cluster_context(cluster_labels, self.cluster_dcoords, self.cluster_pcoords, self.cluster_weights)
+        # Get the cluster labels for the segments
+        seg_labels = cluster_labels[:self.nsegs]
+        # Plot the latent space
         if self.niter % 10 == 0:
-            plot_scatter(
-                embedding_history,
-                kmeans.labels_,
-                self.log_path / f"embedding-cluster-{self.niter}.png",
-            )
-            plot_scatter(
-                embedding_history,
-                pcoord_history,
-                self.log_path / f"embedding-pcoord-{self.niter}.png",
-            )
-        return seg_labels
+            self.plot_latent_space(cluster_z, cluster_labels, self.cluster_pcoords, self.cluster_weights)
+        # Add the cluster labels to the DataFrame
+        df["ls_cluster"] = seg_labels
+        return df
     
-    def dbscan_hp_sweep(self, embedding_history: np.ndarray) -> None:
-        if self.niter == 1000 or self.niter == 1100 or self.niter == 1200 or self.niter == 1300 or self.niter == 1400:
-            for x in range(1, 41):
-                for y in range(1, 41):
-                    clustering = DBSCAN(eps=y*.025, min_samples=x*5).fit(embedding_history)
-                    plot_scatter(
-                        embedding_history,
-                        clustering.labels_,
-                        self.log_path / f"embedding-cluster-{self.niter}-min-{x*5}-eps-{y*.05}.png",
-                    )
-                    print(x*5, y*.05, len(set(clustering.labels_)), list(clustering.labels_).count(-1)/len(clustering.labels_))
-    
-    def dbscan_cluster_segments(self, embedding_history: np.ndarray) -> np.ndarray:
+    def dbscan_cluster_segments(self, df: pd.DataFrame, cluster_z: np.ndarray) -> pd.DataFrame:
         """
-        Perform DBSCAN clustering on the given embedding history.
+        Cluster the segments using DBSCAN algorithm and assign cluster labels to the DataFrame.
 
-        Parameters:
-            embedding_history (np.ndarray): The embedding history to be clustered.
+        Args:
+            df (pd.DataFrame): The DataFrame containing the segments.
+            cluster_z (np.ndarray): The latent space representation of the segments.
 
         Returns:
-            np.ndarray: The cluster labels assigned to each data point in the embedding history.
+            pd.DataFrame: The DataFrame with cluster labels assigned to the segments.
         """
-        # Perform the DBSCAN clustering
-        clustering = DBSCAN(min_samples=self.dbscan_min_samples, eps=self.dbscan_epsilon, metric=cosine_distance).fit(embedding_history)
-        return clustering.labels_
-
-    def optics_cluster_segments(self, embedding_history: np.ndarray, pcoord_history: np.ndarray) -> np.ndarray:
-        # Load up to the old latent coordinates here
-        if self.niter > self.cluster_iteration_history:
-            min_samples = 135
-        else:
-            min_samples = int(self.niter * 1.35) + 1
-
-        # Perform the K-means clustering
-        clustering = OPTICS(min_samples=min_samples).fit(embedding_history)
-        
+        # Cluster the segments
+        cluster_labels = DBSCAN(min_samples=self.dbscan_min_samples, 
+                                eps=self.dbscan_epsilon, 
+                                metric=cosine_distance).fit(cluster_z).labels_
+        print(f"Total number of clusters: {max(set(cluster_labels)) + 1}")
+        # Save the cluster context data
+        self.save_cluster_context(cluster_labels, self.cluster_dcoords, self.cluster_pcoords, self.cluster_weights)
+        # Add the cluster labels to the DataFrame
+        df["ls_cluster"] = cluster_labels[:self.nsegs]
+        # Plot the latent space
         if self.niter % 10 == 0:
-            plot_scatter(
-                embedding_history,
-                clustering.labels_,
-                self.log_path / f"embedding-cluster-{self.niter}.png",
-            )
-            plot_scatter(
-                embedding_history,
-                pcoord_history,
-                self.log_path / f"embedding-pcoord-{self.niter}.png",
-            )
-            
-            # exit()
-        return clustering.labels_
+            self.plot_latent_space(cluster_z, cluster_labels, self.cluster_pcoords, self.cluster_weights)
+        # Assign the outliers
+        df = self.assign_density_outliers(df, cluster_z, cluster_labels)
+        return df
+
+    # TODO: Fix the outliers for gmm
+    def gmm_cluster_segments(self, df: pd.DataFrame, cluster_z: np.ndarray) -> pd.DataFrame:
+        """
+        Cluster the segments using Gaussian Mixture Model and assign cluster labels to the DataFrame.
+
+        Args:
+            df (pd.DataFrame): The DataFrame containing the segments.
+            cluster_z (np.ndarray): The latent space representation of the segments.
+
+        Returns:
+            pd.DataFrame: The DataFrame with cluster labels assigned to the segments.
+        """
+        # Perform the GMM clustering
+        gmm = BayesianGaussianMixture(n_components=self.gmm_clusters).fit(cluster_z)
+        cluster_labels = gmm.predict(cluster_z)
+        # Save the cluster context data
+        self.save_cluster_context(cluster_labels, self.cluster_dcoords, self.cluster_pcoords, self.cluster_weights)
+        # Get the cluster labels for the segments
+        seg_labels = cluster_labels[:self.nsegs]
+        # Plot the latent space
+        if self.niter % 10 == 0:
+            self.plot_latent_space(cluster_z, cluster_labels, self.cluster_pcoords, self.cluster_weights)
+        # Add the cluster labels to the DataFrame
+        df["ls_cluster"] = seg_labels
+        # Assign the outliers
+        df = self.assign_density_outliers(df, cluster_z, seg_labels, cluster_z[:self.nsegs])
+        return df
+    
+    def sort_df_for_density(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Sorts the given DataFrame for the density clustering.
+
+        Parameters:
+            df (pd.DataFrame): The DataFrame to be sorted.
+
+        Returns:
+            pd.DataFrame: The sorted DataFrame.
+        """
+        by_pcoord = df.sort_values(["outlier", 'pcoord'], ascending=[False, True])
+        # Check if sorting by distance and pcoord is the same
+        if self.target_point is not None:
+            by_distance = df.sort_values(["outlier", 'distance'], ascending=[False, True])
+            self.test_pcoord_vs_dist_sort(by_pcoord, by_distance)        
+        if self.sort_by == "pcoord":
+            return by_pcoord
+        elif self.sort_by == "distance":
+            return by_distance
+        else:
+            return by_pcoord
+
+    def sort_df_for_gmm(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Sorts the given DataFrame for the GMM clustering.
+
+        Parameters:
+            df (pd.DataFrame): The DataFrame to be sorted.
+
+        Returns:
+            pd.DataFrame: The sorted DataFrame.
+        """
+        by_pcoord = df.sort_values(["outlier", 'pcoord'], ascending=[False, True])
+        # Check if sorting by distance and pcoord is the same
+        if self.target_point is not None:
+            by_distance = df.sort_values(["outlier", 'distance'], ascending=[False, True])
+            self.test_pcoord_vs_dist_sort(by_pcoord, by_distance)
+        if self.sort_by == "pcoord":
+            return by_pcoord
+        elif self.sort_by == "distance":
+            return by_distance
+        else:
+            return by_pcoord
+
+    def assign_density_outliers(self, df: pd.DataFrame, cluster_z: np.ndarray, cluster_labels: np.ndarray) -> np.ndarray:
+        """
+        Assigns density outliers to the input DataFrame based on clustering results.
+
+        Args:
+            df (pd.DataFrame): The input DataFrame.
+            cluster_z (np.ndarray): The embedding history of the clusters.
+            cluster_labels (np.ndarray): The labels of the clusters.
+            seg_z (np.ndarray): The embedding history of the segments.
+
+        Returns:
+            np.ndarray: The updated DataFrame with density outliers assigned.
+
+        """
+        df["outlier"] = np.zeros(self.nsegs).astype(bool)
+        seg_z = cluster_z[:self.nsegs]
+        # if there are any outliers
+        print(f"Number of outliers: {np.sum(cluster_labels[:self.nsegs] == -1)}")
+        if -1 in df['ls_cluster'].values:
+            # Set all the -1s to be outliers
+            df['outlier'] = np.where(df['ls_cluster'] == -1, True, False)
+            # Remove the outliers from the projections and labels
+            inlier_embedding_history = cluster_z[cluster_labels != -1]
+            inlier_labels = cluster_labels[cluster_labels != -1]
+            # Loop through the outlier indices
+            for ind in df[df['outlier']].inds.values:
+                # Find the distance to points in the embedding_history
+                dist = np.array([cosine_distance(seg_z[ind], z) for z in inlier_embedding_history])
+                # Set zero dists to the max; should only happen if measuring the point to itself
+                dist[dist == 0] = np.max(dist)
+                # Find the min index
+                min_ind = np.argmin(dist)
+                # Set the ls_cluster for the outlier to match the min dist point
+                df.loc[ind, 'ls_cluster'] = inlier_labels[min_ind]
+        return df
 
     def get_prev_dcoords_training(self, segments: Sequence[Segment], curr_dcoords: np.ndarray, iters_back: int) -> np.ndarray:
         # Grab all the d-matrices from the last iteration (n_iter-1), will be in seg_id order by default.
@@ -1048,28 +1199,29 @@ class CustomDriver(DeepDriveMDDriver):
             pd.DataFrame: A DataFrame containing only the rows where 'ls_cluster' matches the given id.
         """
         return df[df['ls_cluster'] == id]
-    
-    def sort_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        
+    def test_pcoord_vs_dist_sort(self, by_pcoord: pd.DataFrame, by_dist: pd.DataFrame) -> None:
         """
-        Sorts the given DataFrame based on specified columns.
+        Tests if the sorting by pcoord and distance is the same.
 
         Parameters:
-            df (pd.DataFrame): The DataFrame to be sorted.
+            by_pcoord (pd.DataFrame): The DataFrame sorted by pcoord.
+            by_dist (pd.DataFrame): The DataFrame sorted by distance.
 
         Returns:
-            pd.DataFrame: The sorted DataFrame.
+            None
         """
-        by_pcoord = df.sort_values(["outlier", 'pcoord'], ascending=[False, True])
-        if self.target_point is not None:
-            by_distance = df.sort_values(["outlier", 'distance'], ascending=[False, True])
-            if list(by_distance.inds.values) == list(by_pcoord.inds.values):
-                print("Sorting by distance and pcoord is the same!")
-        if self.sort_by == "pcoord":
-            return by_pcoord
-        elif self.sort_by == "distance":
-            return by_distance
-        else:
-            return by_pcoord
+        # Check if the indices are the same
+        if list(by_dist.inds.values) == list(by_pcoord.inds.values):
+            # Check if the distances are not the same
+            if not np.all(by_dist.distance.values[0] == by_dist.distance.values):
+                # Check if the pcoords are not the same
+                if not np.all(by_dist.pcoord.values[0] == by_dist.pcoord.values):
+                    # Check that the df is not one row
+                    if not len(by_dist) == 1:
+                        num_uni_distances = len(np.unique(by_dist.distance.values))
+                        num_uni_pcoords = len(np.unique(by_dist.pcoord.values))
+                        print(f"Sorting by distance and pcoord is the same! {num_uni_distances} unique distances and {num_uni_pcoords} unique pcoords.")
 
     def remove_overweight_segs(self, cluster_df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1142,9 +1294,9 @@ class CustomDriver(DeepDriveMDDriver):
             print(removed_merges)
 
         # Filter out the walkers with too much weight
-        cluster_df = self.remove_overweight_segs(cluster_df).sort_values(["outlier", 'pcoord'], ascending=[False, True])
+        cluster_df = self.remove_overweight_segs(cluster_df)
+        cluster_df = self.sort_df(cluster_df)
         num_segs_for_merging = len(cluster_df)
-        print(num_segs_for_merging, min_segs_for_merging)
         # Need a minimum number of walkers for merging
         if num_segs_for_merging < min_segs_for_merging:
             print(f"Walkers up for merging have weights that are too large. Skipping split/merge on iteration {self.niter}...")
@@ -1206,210 +1358,65 @@ class CustomDriver(DeepDriveMDDriver):
         return num_resamples
     
     def save_cluster_context(self, cluster_labels: np.ndarray, cluster_dcoords: np.ndarray, cluster_pcoords: np.ndarray, cluster_weights: np.ndarray) -> None:
-            """
-            Save the cluster context data.
+        """
+        Save the cluster context to files.
 
-            Args:
-                cluster_labels (np.ndarray): Array of cluster labels.
-                cluster_dcoords (np.ndarray): Array of dcoords for each cluster.
-                cluster_pcoords (np.ndarray): Array of pcoords for each cluster.
+        Args:
+            cluster_labels (np.ndarray): Array of cluster labels.
+            cluster_dcoords (np.ndarray): Array of cluster dcoords.
+            cluster_pcoords (np.ndarray): Array of cluster pcoords.
+            cluster_weights (np.ndarray): Array of cluster weights.
 
-            Returns:
-                None
-            """
-            dcoords_to_save = []
-            pcoords_to_save = []
-            weights_to_save = []
-            # Loop through each cluster label and randomly select up to 50 indices to save
-            for label in set(cluster_labels):
-                indices = np.where(cluster_labels == label)[0]
-                if label != -1 and len(indices) > self.max_save_per_cluster:
-                    indices = self.rng.choice(indices, self.max_save_per_cluster, replace=False)
-                dcoords_to_save.append(cluster_dcoords[indices])
-                pcoords_to_save.append(cluster_pcoords[indices])
-                weights_to_save.append(cluster_weights[indices])
-            dcoords_to_save = [x for y in dcoords_to_save for x in y]
-            pcoords_to_save = [x for y in pcoords_to_save for x in y]
-            weights_to_save = [x for y in weights_to_save for x in y]
-            # Index the dcoord and pcoord arrays to save the selected indices
-            np.save(self.datasets_path / f"cluster-context-dcoords-{self.niter}.npy", dcoords_to_save)
-            np.save(self.datasets_path / f"cluster-context-pcoords-{self.niter}.npy", pcoords_to_save)
-            np.save(self.datasets_path / f"cluster-context-weights-{self.niter}.npy", weights_to_save)
+        Returns:
+            None
+        """
+        dcoords_to_save = []
+        pcoords_to_save = []
+        weights_to_save = []
+        # Loop through each cluster label and randomly select up to 50 indices to save
+        for label in set(cluster_labels):
+            indices = np.where(cluster_labels == label)[0]
+            if label != -1 and len(indices) > self.max_save_per_cluster:
+                indices = self.rng.choice(indices, self.max_save_per_cluster, replace=False)
+            dcoords_to_save.append(cluster_dcoords[indices])
+            pcoords_to_save.append(cluster_pcoords[indices])
+            weights_to_save.append(cluster_weights[indices])
+        dcoords_to_save = [x for y in dcoords_to_save for x in y]
+        pcoords_to_save = [x for y in pcoords_to_save for x in y]
+        weights_to_save = [x for y in weights_to_save for x in y]
+        # Index the dcoord and pcoord arrays to save the selected indices
+        np.save(self.datasets_path / f"cluster-context-dcoords-{self.niter}.npy", dcoords_to_save)
+        np.save(self.datasets_path / f"cluster-context-pcoords-{self.niter}.npy", pcoords_to_save)
+        np.save(self.datasets_path / f"cluster-context-weights-{self.niter}.npy", weights_to_save)
 
-    def plot_latent_space(self, cluster_z: np.ndarray, cluster_labels: np.ndarray, cluster_pcoords: np.ndarray, cluster_weights: np.ndarray) -> None:
-        plot_scatter(
-            cluster_z,
-            cluster_labels,
-            self.log_path / f"embedding-cluster-{self.niter}.png",
-            title=f"iter: {self.niter}",
-            cb_label="cluster ID",
-            num_segs=self.nsegs,
-            target_point=self.target_point if self.target_point is not None else None,
-        )
-        plot_scatter(
-            cluster_z,
-            cluster_pcoords,
-            self.log_path / f"embedding-pcoord-{self.niter}.png",
-            title=f"iter: {self.niter}",
-            cb_label="rmsd to target",
-            num_segs=self.nsegs,
-            target_point=self.target_point if self.target_point is not None else None,
-            min_max_color=(0, 14),
-        )
-        plot_scatter(
-            cluster_z,
-            np.array([cosine_distance(z, self.target_point) for z in cluster_z]),
-            self.log_path / f"embedding-distance-{self.niter}.png",
-            title=f"iter: {self.niter}",
-            cb_label="latent space distance to target",
-            num_segs=self.nsegs,
-            target_point=self.target_point if self.target_point is not None else None,
-            min_max_color=(0, 2),
-        )
-        plot_scatter(
-            cluster_z,
-            cluster_weights,
-            self.log_path / f"embedding-weight-{self.niter}.png",
-            title=f"iter: {self.niter}",
-            cb_label="weight",
-            num_segs=self.nsegs,
-            target_point=self.target_point if self.target_point is not None else None,
-            min_max_color=(self.split_weight_limit, self.merge_weight_limit),
-            log_scale=True,
-        )
+    def load_cluster_context(self, dcoords, pcoords, weight) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Load the cluster context for clustering.
+
+        Args:
+            dcoords (np.ndarray): The current dcoords.
+            pcoords (np.ndarray): The current pcoords.
+            weight (np.ndarray): The current weight.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray, np.ndarray]: A tuple containing the concatenated dcoords, pcoords, and weights.
+
+        """
+        if self.niter > 1:
+            # Load the past data to use as context for clustering
+            past_dcoords = np.load(self.datasets_path / f"cluster-context-dcoords-{self.niter - 1}.npy")
+            past_pcoords = np.load(self.datasets_path / f"cluster-context-pcoords-{self.niter - 1}.npy")
+            past_weights = np.load(self.datasets_path / f"cluster-context-weights-{self.niter - 1}.npy")
+            self.cluster_dcoords = np.concatenate([dcoords, past_dcoords])
+            self.cluster_pcoords = np.concatenate([pcoords, past_pcoords])
+            self.cluster_weights = np.concatenate([weight, past_weights])
+        else:
+            self.cluster_dcoords = dcoords
+            self.cluster_pcoords = pcoords
+            self.cluster_weights = weight
     
-    def run(self, bin: Bin, cur_segments: Sequence[Segment], next_segments: Sequence[Segment]) -> None:
-        self.bin = bin
-        self.segments = next_segments
-
-        # Get data for sorting
-        pcoords = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
-        try:
-            final_state = self.get_auxdata(cur_segments, "state_indices")[:, -1]
-        except KeyError:
-            final_state = self.get_restart_auxdata("state_indices")[:, -1]
-        
-        weight = self.get_weights(cur_segments)[:]
-
-        if self.ml_mode != 'ablation':
-            if self.ml_mode == 'train':
-                # Determine the location for the training data/model
-                if self.niter < self.update_interval:
-                    self.train_path = self.log_path / "ml-iter-1"
-                else:
-                    self.train_path = (
-                        self.log_path
-                        / f"ml-iter-{self.niter - self.niter % self.update_interval}"
-                    )
-                # Init the ML method
-                self.train_path.mkdir(exist_ok=True)
-            
-            self.machine_learning_method = MachineLearningMethod(
-                self.train_path, self.base_training_data_path
-            )
-
-            # extract and format current iteration's data
-            # additional audxata can be extracted in a similar manner
-            try:
-                cur_dcoords = self.get_dcoords(cur_segments)
-            except KeyError:
-                cur_dcoords = self.get_restart_dcoords()
-
-            # Concatenate all frames together
-            cur_dcoords = np.concatenate(cur_dcoords)
-
-            all_dcoords = self.get_prev_dcoords_training(next_segments, cur_dcoords, self.lag_iterations)
-
-            cur_dcoords = all_dcoords[:self.nsegs]
-
-            np.save(self.datasets_path / f"dcoords-{self.niter}.npy", cur_dcoords)
-            if self.niter > 1:
-                # Load the past data to use as context for clustering
-                past_dcoords = np.load(self.datasets_path / f"cluster-context-dcoords-{self.niter - 1}.npy")
-                past_pcoords = np.load(self.datasets_path / f"cluster-context-pcoords-{self.niter - 1}.npy")
-                past_weights = np.load(self.datasets_path / f"cluster-context-weights-{self.niter - 1}.npy")
-                cluster_dcoords = np.concatenate([cur_dcoords, past_dcoords])
-                cluster_pcoords = np.concatenate([pcoords, past_pcoords])
-                cluster_weights = np.concatenate([weight, past_weights])
-            else:
-                cluster_dcoords = cur_dcoords
-                cluster_pcoords = pcoords
-                cluster_weights = weight
-
-            if self.ml_mode == 'train':
-                print("Train")
-                # Train a new model if it's time
-                if self.niter == 1 or self.niter % self.update_interval == 0:
-                    print(f"Training a model on iteration {self.niter}...")
-                    self.machine_learning_method.train(all_dcoords)
-                # Predict
-                cluster_z = self.machine_learning_method.predict(cluster_dcoords)
-            else:
-                print("Static")
-                # Predict
-                cluster_z = self.machine_learning_method.predict(cluster_dcoords, self.static_chk_path)
-            
-            start = time.time()
-            # Cluster the segments
-            cluster_labels = self.dbscan_cluster_segments(cluster_z)
-            print(f"Clustered for {time.time() - start} seconds")
-            print(f"{max(set(cluster_labels)) + 1=}")
-            print(f"{len(cluster_labels)=}")
-            # Save the cluster context data
-            self.save_cluster_context(cluster_labels, cluster_dcoords, cluster_pcoords, cluster_weights)
-            # Get the cluster labels for the segments
-            seg_labels = cluster_labels[:self.nsegs]
-            seg_z = cluster_z[:self.nsegs]
-        else: # no ML of any kind
-            print("Ablation")
-            seg_labels = [self.rng.integers(self.kmeans_clusters) for _ in range(self.nsegs)]
-
-        df = pd.DataFrame(
-            {
-                "ls_cluster": seg_labels,
-                "outlier": np.zeros(self.nsegs).astype(bool),
-                "inds": np.arange(self.nsegs),
-                "pcoord": pcoords,
-                "cluster_id": final_state,
-                "weight": weight,
-            }
-        )   
-        if self.target_point is not None:
-            df["distance"] = [cosine_distance(z, self.target_point) for z in seg_z]
-
-        # Plot the latent space
-        if self.niter % 10 == 0:
-            self.plot_latent_space(cluster_z, cluster_labels, cluster_pcoords, cluster_weights)
-        # Set of all the cluster
-        cluster_ids = sorted(set(seg_labels))
-        # if there are any outliers
-        if -1 in cluster_ids:
-            # Set all the -1s to be outliers
-            df['outlier'] = np.where(df['ls_cluster'] == -1, True, False)
-            # Remove the outliers from the projections and labels
-            inlier_embedding_history = cluster_z[cluster_labels != -1]
-            inlier_labels = cluster_labels[cluster_labels != -1]
-            
-            # Loop through the outlier indices
-            for ind in df[df['outlier']].inds.values:
-                # Find the distance to points in the embedding_history
-                dist = cdist(seg_z[ind].reshape(-1, seg_z.shape[1]), inlier_embedding_history)
-                # Set zero dists to the max; should only happen if measuring the point to itself
-                dist[dist == 0] = np.max(dist)
-                # Find the min index
-                min_ind = np.argmin(dist)
-                # Set the ls_cluster for the outlier to match the min dist point
-                df.loc[ind, 'ls_cluster'] = inlier_labels[min_ind]
-        
-        # Set of all the cluster ids
-        cluster_ids = sorted(set(df.ls_cluster.values))
-        print(f"{len(cluster_ids)=}")
-        print(df)
-        print(f"{cluster_ids=}")
-        # Ideal number of walkers per cluster
-        ideal_segs_per_cluster = int((len(df)) / len(cluster_ids))
-        print(f"{ideal_segs_per_cluster=}")
-        for id in cluster_ids:
+    def resample_by_weight_in_clusters(self, df: pd.DataFrame) -> pd.DataFrame:
+        for id in set(df['ls_cluster']):
             # Get just the walkers in this cluster
             cluster_df = self.get_cluster_df(df, id)
             cluster_df = self.sort_df(cluster_df)
@@ -1417,16 +1424,17 @@ class CustomDriver(DeepDriveMDDriver):
             print(cluster_df)
 
             # Ideal weight splits + merges
-            self._split_by_weight(cluster_df, ideal_segs_per_cluster)
-            self._merge_by_weight(cluster_df, ideal_segs_per_cluster)
+            self._split_by_weight(cluster_df, self.ideal_segs_per_cluster)
+            self._merge_by_weight(cluster_df, self.ideal_segs_per_cluster)
 
         # Regenerate the df
         df = self.recreate_df(df)
         print("After ideal weight split/merge")
         print(df)
-
-        print("Starting adjust counts split/merges")
-        for id in cluster_ids:
+        return df
+    
+    def adjust_counts_in_clusters(self, df: pd.DataFrame) -> pd.DataFrame:
+        for id in set(df['ls_cluster']):
             # Get just the walkers in this cluster
             cluster_df = self.get_cluster_df(df, id)
             cluster_df = self.sort_df(cluster_df)
@@ -1434,28 +1442,40 @@ class CustomDriver(DeepDriveMDDriver):
             print(cluster_df)
             # Total number of walkers in the cluster
             num_segs_in_cluster = len(cluster_df)
-
-            if num_segs_in_cluster == ideal_segs_per_cluster: # correct number of walkers
+            # Correct number of walkers per cluster
+            if num_segs_in_cluster == self.ideal_segs_per_cluster: 
                 print("Already the correct number of walkers per cluster")
-                
             else:
                 # Number of resamples needed to bring the cluster to the set number of walkers per cluster
-                num_resamples = abs(num_segs_in_cluster - ideal_segs_per_cluster)
-                print(f"{num_resamples=}")
-
-                if num_segs_in_cluster < ideal_segs_per_cluster: # need to split some walkers
+                num_resamples = abs(num_segs_in_cluster - self.ideal_segs_per_cluster)
+                print(f"Number of resamples needed to hit the ideal number of segs in this cluster: {num_resamples}")
+                # Need to split some walkers
+                if num_segs_in_cluster < self.ideal_segs_per_cluster: 
                     self.split_up_to(cluster_df, num_resamples)
-
-                else: # Need to merge some walkers
-                    min_segs_for_merging = num_segs_in_cluster - ideal_segs_per_cluster + 1
+                # Need to merge some walkers
+                else: 
+                    # Minimum number of walkers needed for merging
+                    min_segs_for_merging = num_segs_in_cluster - self.ideal_segs_per_cluster + 1
                     self.merge_down_to(cluster_df,  num_resamples, min_segs_for_merging)
 
         # Regenerate the df
         df = self.recreate_df(df)
         print("After adjusting count split/merge")
         print(df)
+        return df
 
-        for id in cluster_ids:
+    def resample_for_target_in_clusters(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Resamples the data for each cluster in the given DataFrame.
+
+        Args:
+            df (pd.DataFrame): The input DataFrame containing the data.
+
+        Returns:
+            pd.DataFrame: The resampled DataFrame.
+
+        """
+        for id in set(df['ls_cluster']):
             # Get just the walkers in this cluster
             cluster_df = self.get_cluster_df(df, id)
             cluster_df = self.sort_df(cluster_df)
@@ -1470,26 +1490,112 @@ class CustomDriver(DeepDriveMDDriver):
             if num_segs_in_cluster != og_len:
                 print("After removing walkers outside thresholds")
                 print(cluster_df)
+            # Decide the number of resamples based on the number of segments in the cluster
             num_resamples = self.decide_num_resamples(num_segs_in_cluster)            
-            print(f"{num_resamples=}")
+            print(f"Number of resamples based on the cluster length: {num_resamples}")
             if num_resamples != 0:
                 # Run resampling for the cluster
                 self.split_decider(cluster_df, num_resamples, num_resamples)
                 self.merge_decider(cluster_df, 2 * num_resamples, num_resamples)
 
-        if self.ml_mode != "ablation":
+        # Regenerate the df
+        df = self.recreate_df(df)
+        print("After target seeking split/merge")
+        print(df)
+        return df
+    
+    def run(self, bin: Bin, cur_segments: Sequence[Segment], next_segments: Sequence[Segment]) -> None:
+        self.bin = bin
+        self.segments = next_segments
 
-            # Log dataframes
-            df.to_csv(self.datasets_path / f"full-niter-{self.niter}.csv")
-
-            # Log the machine learning outputs
-            np.save(self.datasets_path / f"z-{self.niter}.npy", seg_z)
-
-            # Save data for plotting
-            np.save(
-                self.datasets_path / f"last-z-{self.niter}.npy",
-                np.reshape(seg_z, (self.nsegs, self.nframes, -1))[:, -1, :],
+        # Get data for sorting
+        pcoords = np.concatenate(self.get_pcoords(cur_segments)[:, -1])
+        try:
+            final_state = self.get_auxdata(cur_segments, "state_indices")[:, -1]
+        except KeyError:
+            final_state = self.get_restart_auxdata("state_indices")[:, -1]
+        
+        weight = self.get_weights(cur_segments)[:]
+        df = pd.DataFrame(
+            {
+                "inds": np.arange(self.nsegs),
+                "pcoord": pcoords,
+                "cluster_id": final_state,
+                "weight": weight,
+            }
+        )
+        if self.ml_mode != 'ablation':
+            if self.ml_mode == 'train':
+                # Determine the location for the training data/model
+                if self.niter < self.update_interval:
+                    self.train_path = self.log_path / "ml-iter-1"
+                else:
+                    self.train_path = (
+                        self.log_path
+                        / f"ml-iter-{self.niter - self.niter % self.update_interval}"
+                    )
+                # Init the ML method
+                self.train_path.mkdir(exist_ok=True)
+            self.machine_learning_method = MachineLearningMethod(
+                self.train_path, self.base_training_data_path, self.static_chk_path,
+                self.contact_cutoff,
             )
-            np.save(self.datasets_path / f"pcoord-{self.niter}.npy", pcoords)
+            # extract and format current iteration's data
+            try:
+                 dcoords = self.get_dcoords(cur_segments)
+            except KeyError:
+                dcoords = self.get_restart_dcoords()
+            dcoords = np.concatenate(dcoords)
+            # Use Jeremy's fancy function to get the dcoords for the previous iterations
+            all_dcoords = self.get_prev_dcoords_training(next_segments, dcoords, self.lag_iterations)
+            # Get the dcoords for the current iteration
+            dcoords = all_dcoords[:self.nsegs]
+
+            # If training on the fly, check if it's time to train the model
+            if self.ml_mode == 'train':
+                if self.niter == 1 or self.niter % self.update_interval == 0:
+                    print(f"Training a model on iteration {self.niter}...")
+                    self.machine_learning_method.train(all_dcoords)
+            
+            # Load the cluster context
+            self.load_cluster_context(dcoords, pcoords, weight)
+            
+            # Predict the latent space coordinates
+            cluster_z = self.machine_learning_method.predict(self.cluster_dcoords)
+            print(f"Total number of points in the latent space (including past iterations): {len(cluster_z)}")
+            seg_z = cluster_z[:self.nsegs]
+            if self.target_point_path is not None:
+                # Get the target point representation
+                self.target_point = self.machine_learning_method.get_target_point_rep(self.target_point_path)
+                # Add the distance column
+                df["distance"] = [cosine_distance(z, self.target_point) for z in seg_z]
+            
+            # Cluster the segments
+            if self.cluster_method == 'kmeans':
+                df = self.kmeans_cluster_segments(cluster_z)
+            elif self.cluster_method == 'dbscan':
+                df = self.dbscan_cluster_segments(df, cluster_z)
+            elif self.cluster_method == 'optics':
+                df = self.optics_cluster_segments(cluster_z, pcoords)
+
+        else: # no ML of any kind
+            print("Ablation")
+            seg_labels = [self.rng.integers(8) for _ in range(self.nsegs)]
+            df["ls_cluster"] = seg_labels
+
+        # Set of all the cluster ids
+        cluster_ids = sorted(set(df.ls_cluster.values))
+        print(f"Number of clusters that have segments in them currently: {len(cluster_ids)}")
+        # Ideal number of walkers per cluster
+        self.ideal_segs_per_cluster = int((len(df)) / len(cluster_ids))
+        print(f"Ideal number of walkers per cluster: {self.ideal_segs_per_cluster}")
+        print(df)
+
+        print("Starting ideal weight split/merges")
+        df = self.resample_by_weight_in_clusters(df)
+        print("Starting adjust counts split/merges")
+        df = self.adjust_counts_in_clusters(df)
+        print("Starting target seeking split/merges")
+        df = self.resample_for_target_in_clusters(df)
   
 
