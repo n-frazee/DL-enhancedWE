@@ -1719,12 +1719,10 @@ class CustomDriver(DeepDriveMDDriver):
                 self.machine_learning_method.train(all_dcoords)
 
             if self.cfg.target_point_path is not None:
-                # TODO: Fix the target point
                 # Get the target point representation
                 self.target_point = self.machine_learning_method.get_target_point_rep(
                     self.cfg.target_point_path
                 )
-                # self.target_point = np.load("target_point.npy")
 
             # Initialize the objective object with the target point
             self.objective = Objective(
