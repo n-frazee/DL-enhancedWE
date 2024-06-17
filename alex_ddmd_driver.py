@@ -995,10 +995,14 @@ class Objective:
             self.all_weights = weight
 
     def lof_function(self, all_z: np.ndarray) -> np.ndarray:
+        # Time the LOF function
+        start = time.time()
         # Run LOF on the full history of embeddings to assure coverage over past states
         clf = LocalOutlierFactor(
             n_neighbors=self.cfg.lof_n_neighbors, metric=self.distance_function
         ).fit(all_z)
+        # Print the timing
+        print(f"LOF took {time.time() - start} seconds")
         return clf.negative_outlier_factor_
 
     def kmeans_cluster_segments(self, all_z: np.ndarray) -> np.ndarray:
@@ -1482,9 +1486,8 @@ class CustomDriver(DeepDriveMDDriver):
                 num_segs_for_splitting = len(df)
                 # Test if there are enough walkers with sufficient weight to split
                 if num_segs_for_splitting == 0:
-                    cluster_id = df.ls_cluster.values[0]
                     print(
-                        f"Walkers up for splitting have weights that are too small. Skipping split/merge in cluster {cluster_id} on iteration {self.niter}..."
+                        f"Walkers up for splitting have weights that are too small. Skipping split/merge a on iteration {self.niter}..."
                     )
                 else:  # Splitting can happen!
                     df = self.sort_df_cluster(df)
@@ -1501,7 +1504,7 @@ class CustomDriver(DeepDriveMDDriver):
                 # Need a minimum number of walkers for merging
                 if num_segs_for_merging < min_segs_for_merging:
                     print(
-                        f"Walkers up for merging have weights that are too large. Skipping split/merge in cluster {id} on iteration {self.niter}..."
+                        f"Walkers up for merging have weights that are too large. Skipping split/merge in on iteration {self.niter}..."
                     )
                 else:  # Merging gets to happen!
                     df = self.sort_df_cluster(df)
@@ -1622,9 +1625,9 @@ class CustomDriver(DeepDriveMDDriver):
             df = df.sample(frac=1)
 
         # Top outliers are up for splitting
-        split_df = df.head(self.cfg.lof_consider_for_resample)
+        split_df = df.head(self.objective.cfg.lof_consider_for_resample)
         # Bottom outliers are up for merging
-        merge_df = df.tail(self.cfg.lof_consider_for_resample)
+        merge_df = df.tail(self.objective.cfg.lof_consider_for_resample)
 
         # Remove out of weight walkers
         print("Walkers up for splitting")
