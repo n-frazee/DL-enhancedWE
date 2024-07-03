@@ -37,7 +37,31 @@ from westpa_ddmd.config import BaseSettings
 log = logging.getLogger(__name__)
 
 
+def euclidean_cosine_distance(v1: np.ndarray, v2: np.ndarray) -> float:
+    """
+    Compute the euclidean cosine distance between two vectors.
+
+    Parameters:
+        v1 (np.ndarray): The first vector.
+        v2 (np.ndarray): The second vector.
+
+    Returns:
+        float: The euclidean cosine distance between the two vectors.
+    """
+    return np.sqrt(2 * cosine_distance(v1, v2))
+
+
 def cosine_distance(v1: np.ndarray, v2: np.ndarray) -> float:
+    """
+    Compute the cosine distance between two vectors.
+
+    Parameters:
+        v1 (np.ndarray): The first vector.
+        v2 (np.ndarray): The second vector.
+
+    Returns:
+        float: The cosine distance between the two vectors.
+    """
     similarity = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
     return 1 - similarity
 
@@ -1487,7 +1511,7 @@ class CustomDriver(DeepDriveMDDriver):
                 # Test if there are enough walkers with sufficient weight to split
                 if num_segs_for_splitting == 0:
                     print(
-                        f"Walkers up for splitting have weights that are too small. Skipping split/merge a on iteration {self.niter}..."
+                        f"Walkers up for splitting have weights that are too small. Skipping split/merge in a cluster on iteration {self.niter}..."
                     )
                 else:  # Splitting can happen!
                     df = self.sort_df_cluster(df)
@@ -1504,7 +1528,7 @@ class CustomDriver(DeepDriveMDDriver):
                 # Need a minimum number of walkers for merging
                 if num_segs_for_merging < min_segs_for_merging:
                     print(
-                        f"Walkers up for merging have weights that are too large. Skipping split/merge in on iteration {self.niter}..."
+                        f"Walkers up for merging have weights that are too large. Skipping split/merge in a cluster on iteration {self.niter}..."
                     )
                 else:  # Merging gets to happen!
                     df = self.sort_df_cluster(df)
