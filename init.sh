@@ -24,6 +24,6 @@ mkdir   seg_logs traj_segs istates
 # The tstate would be structures with RMSD < 1 Ang
 
 w_init --bstate-file "ntl9_folding_synd/bstates.txt" \
-        --tstate 'folded,0.5' \
+        --tstate-file "tstate.file" \
 	--segs-per-state 2 \
 	--work-manager=threads "$@" > init.log
