@@ -1,24 +1,22 @@
 import logging
 import time
+import operator
+import os
+from copy import deepcopy
+from os.path import expandvars
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Sequence, Tuple, Union
 
 import matplotlib as mpl
+import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from natsort import natsorted
+mpl.use('Agg')
 
-mpl.use("Agg")
-import operator
-import os
-from copy import deepcopy
-from os.path import expandvars
-
-import matplotlib.pyplot as plt
 import mdtraj
-import westpa
 from itertools import combinations_with_replacement
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
 from scipy.sparse import coo_matrix
@@ -26,6 +24,9 @@ from scipy.spatial import distance_matrix
 from sklearn.cluster import DBSCAN, KMeans
 from sklearn.mixture import BayesianGaussianMixture
 from sklearn.neighbors import LocalOutlierFactor
+from sklearn.metrics.pairwise import cosine_distances, euclidean_distances
+
+import westpa
 from westpa.core.binning import Bin
 from westpa.core.h5io import tostr
 from westpa.core.segment import Segment
@@ -48,26 +49,9 @@ def euclidean_cosine_distance(v1: np.ndarray, v2: np.ndarray) -> float:
     Returns:
         float: The euclidean cosine distance between the two vectors.
     """
-    return np.sqrt(2 * cosine_distance(v1, v2))
-
-
-def cosine_distance(v1: np.ndarray, v2: np.ndarray) -> float:
-    """
-    Compute the cosine distance between two vectors.
-
-    Parameters:
-        v1 (np.ndarray): The first vector.
-        v2 (np.ndarray): The second vector.
-
-    Returns:
-        float: The cosine distance between the two vectors.
-    """
     similarity = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-    return 1 - similarity
 
-
-def euclidean_distance(v1: np.ndarray, v2: np.ndarray) -> float:
-    return np.linalg.norm(v1 - v2)
+    return np.sqrt(2 * (1 - similarity))
 
 
 def find_combinations(num_resamples: int, num_segs: int) -> List[np.ndarray]:
@@ -977,11 +961,20 @@ class Objective:
         self.log_path = log_path
         self.datasets_path = datasets_path
         self.rng = np.random.default_rng()
+
         dist_functions = {
-            "cosine": cosine_distance,
-            "euclidean": euclidean_distance,
+            "cosine": cosine_distances,
+            "euclidean_cosine": euclidean_cosine_distance,
+            "euclidean": euclidean_distances,
         }
+        dist_metric = {
+            "cosine": 'cosine',
+            "euclidean_cosine": euclidean_cosine_distance,
+            "euclidean": 'minkowski',
+        }
+
         self.distance_function = dist_functions[self.cfg.distance_metric]
+        self.distance_metric = dist_metric[self.cfg.distance_metric]
 
     def save_latent_context(
         self,
@@ -1090,7 +1083,7 @@ class Objective:
         start = time.time()
         # Run LOF on the full history of embeddings to assure coverage over past states
         clf = LocalOutlierFactor(
-            n_neighbors=self.cfg.lof_n_neighbors, metric=self.distance_function
+            n_neighbors=self.cfg.lof_n_neighbors, metric=self.distance_metric
         ).fit(all_z)
         # Print the timing
         print(f"LOF took {time.time() - start} seconds")
@@ -1211,7 +1204,7 @@ class Objective:
             DBSCAN(
                 min_samples=self.cfg.dbscan_min_samples,
                 eps=self.cfg.dbscan_epsilon,
-                metric=self.distance_function,
+                metric=self.distance_metric,
             )
             .fit(all_z)
             .labels_
@@ -1269,7 +1262,10 @@ class Objective:
             # Loop through the outlier indices
             for ind in np.nditer(np.where(outliers)):
                 # Find the distance to points in the embedding_history
-                dist = [self.distance_function(all_z[ind], z) for z in inlier_z]
+                try:
+                    dist = self.distance_function(all_z[ind], inlier_z)
+                except ValueError:
+                    dist = [self.distance_function(all_z[ind], z) for z in inlier_z]
 
                 # Find the min index
                 min_ind = np.argmin(np.array(dist))
@@ -1338,6 +1334,8 @@ class DDWESettings(BaseSettings):
     # num_trial_splits exceed limit, split/merge is skipped
     # that iteration
     merge_weight_limit: float
+    # Whether to sort by rmsd before resampling
+    not_sort_by_rmsd: bool = False
 
     @classmethod
     def from_westpa_config(cls) -> "DDWESettings":
@@ -1801,7 +1799,7 @@ class CustomDriver(DeepDriveMDDriver):
             df = df.sort_values("outlier", ascending=True)
         else:
             # Randomly shuffle the DataFrame
-            df = df.sample(frac=1)
+            df = df.sample(frac=1, random_state=self.rng)
 
         # Top outliers are up for splitting
         split_df = df.head(self.objective.cfg.lof_consider_for_resample)
@@ -1846,8 +1844,12 @@ class CustomDriver(DeepDriveMDDriver):
 
         print(f"Number of resamples based on the number of walkers: {num_resamples}")
         if num_resamples != 0:
-            split_df = self.sort_df_lof(split_df)
-            merge_df = self.sort_df_lof(merge_df)
+            if self.cfg.not_sort_by_rmsd:
+                split_df = split_df.sample(frac=1, random_state=self.rng)
+                merge_df = merge_df.sample(frac=1, random_state=self.rng)
+            else:
+                split_df = self.sort_df_lof(split_df)
+                merge_df = self.sort_df_lof(merge_df)
             # Run resampling for the cluster
             self.split_with_combinations(split_df, num_resamples, num_resamples)
             self.merge_with_combinations(merge_df, 2 * num_resamples, num_resamples)
@@ -1920,10 +1922,13 @@ class CustomDriver(DeepDriveMDDriver):
             all_z = self.machine_learning_method.predict(self.objective.all_dcoords)
             print(f"Total number of points in the latent space: {len(all_z)}")
             if self.cfg.target_point_path is not None:
-                all_distance = [
-                    self.objective.distance_function(z, self.target_point)
-                    for z in all_z
-                ]
+                try:
+                    all_distance = self.objective.distance_function(all_z, [self.target_point])
+                except ValueError:
+                    all_distance = [
+                        self.objective.distance_function(z, self.target_point)
+                        for z in all_z
+                    ]
                 # Add the distance column
                 df["distance"] = all_distance[: self.nsegs]
 
