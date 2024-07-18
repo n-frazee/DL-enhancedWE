@@ -70,13 +70,36 @@ def euclidean_distance(v1: np.ndarray, v2: np.ndarray) -> float:
     return np.linalg.norm(v1 - v2)
 
 
-def find_combinations(num_resamples: int, num_segs) -> List[np.ndarray]:
+def find_combinations(num_resamples: int, num_segs: int) -> List[np.ndarray]:
+    """
+    Find all possible combinations of numbers that sum up to the num_resamples_needed.
+
+    Args:
+        num_resamples (int): The number of resamples needed.
+        num_segs (int): The number of segments available for splitting or merging.
+
+    Returns:
+        List[np.ndarray]: A list of all possible combinations of numbers that sum up to the num_resamples_needed.
+    """
+
+    def generate_combinations(target, length, current_combination, all_combinations):
+        if length == 0:
+            if target == 0:
+                all_combinations.append(np.array(current_combination))
+            return
+        if target <= 0:
+            return
+
+        start = current_combination[-1] if current_combination else 1
+        for num in range(start, num_resamples + 1):
+            generate_combinations(
+                target - num, length - 1, current_combination + [num], all_combinations
+            )
+
     combos = []
-    for x in range(1, num_segs + 1):
-        com = combinations_with_replacement(range(1, num_resamples + 1), x)
-        for c in com:
-            if sum(c) == num_resamples:
-                combos.append(np.array(c))
+    for segs in range(1, num_segs + 1):
+        generate_combinations(num_resamples, segs, [], combos)
+
     return combos
 
 
@@ -179,7 +202,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
             split_possible[self.rng.integers(len(split_possible))], reverse=True
         )
         print(f"split choice: {chosen_splits}")
-        # Get the inds of the se gs
+        # Get the inds of the segs
         sorted_segs = df.inds.values
         # For each of the chosen segs, split by the chosen value
         for idx, n_splits in enumerate(chosen_splits):
@@ -203,8 +226,11 @@ class DeepDriveMDDriver(WEDriver, ABC):
         Returns:
             None
         """
+        # Time the finding of the combinations
+        start = time.time()
         # All the possible combinations of numbers that sum up to the num_resamples_needed
         combos = find_combinations(num_resamples, num_segs_for_merging)
+        print(f"Combination time: {time.time() - start}")
         merges_possible = []
         # Need to check there's enough walkers to use that particular merging scheme
         for x in combos:
@@ -271,6 +297,45 @@ class DeepDriveMDDriver(WEDriver, ABC):
             print("After removing walkers outside threshold")
             print(df)
         return df
+
+    def adjust_counts_by_weight(self, df: pd.DataFrame, ideal_count: int) -> None:
+        """
+        Adjusts the counts of segments in the cluster based on the weight of the segments.
+
+        Args:
+            df (pd.DataFrame): The DataFrame containing the segments.
+            ideal_count (int): The ideal number of segments per cluster.
+
+        Returns:
+            None
+        """
+        # Find how off the counts are
+        diff = len(df) - ideal_count
+        print(f"diff: {diff}")
+        # If there are too many segments
+        if diff > 0:
+            # Get 2 * diff lowest weight segments
+            to_merge = df.sort_values("weight").head(2 * diff)
+            print(f"to merge: {to_merge}")
+            # Pairwise merge the segments
+            for i in range(diff):
+                # Select the segments to merge
+                segs = to_merge.iloc[[i, -(i + 1)]]["inds"].values
+                print(f"segs: {segs}")
+                # Merge the segments
+                self._merge_by_data(self.bin, self.segments[segs])
+
+        # If there are too few segments
+        elif diff < 0:
+            # Get the segments with the highest weight
+            # Note: diff is negative in this case
+            to_split = df.sort_values("weight", ascending=False).head(-diff)
+            # Split the segments
+            for _, row in to_split.iterrows():
+                # Get the segment to split
+                seg = self.segments[int(row["inds"])]
+                # Split the segment
+                self._split_by_data(self.bin, seg, 2)
 
     def get_cluster_df(self, df: pd.DataFrame, id: int) -> pd.DataFrame:
         return df[df["ls_cluster"] == id]
@@ -827,6 +892,8 @@ class MachineLearningMethod:
 class ObjectiveSettings(BaseSettings):
     # Objective method to use (lof, clustering).
     objective_method: str
+    # Cluster resampling algorithm to use (simplified, complex).
+    cluster_resample_method: Optional[str] = "complex"
     # Function to measure distance between latent space points (cosine or euclidean).
     distance_metric: Optional[str] = "cosine"
     # How many walkers to consider for splitting and merging in lof.
@@ -1536,6 +1603,36 @@ class CustomDriver(DeepDriveMDDriver):
                         df, num_segs_for_merging, num_resamples
                     )
 
+    def adjust_counts_by_weight(self, df: pd.DataFrame, ideal_count: int) -> None:
+        """
+        Adjusts the counts of segments in the cluster based on the weight of the segments.
+
+        Args:
+            df (pd.DataFrame): The DataFrame containing the segments.
+            ideal_count (int): The ideal number of segments per cluster.
+
+        Returns:
+            None
+        """
+        # Find how off the counts are
+        diff = len(df) - ideal_count
+        print(f"diff: {diff}")
+        # If there are too many segments
+        if diff > 0:
+            # Sort the segments by weight
+            to_merge = df.sort_values("weight", ascending=False)
+            print(to_merge)
+            # Merge the segments
+            self.merge_with_combinations(to_merge, len(to_merge), diff)
+
+        # If there are too few segments
+        elif diff < 0:
+            # Get the segments with the highest weight
+            to_split = df.sort_values("weight")
+            print(to_split)
+            # Split the segments
+            self.split_with_combinations(to_split, len(to_split), abs(diff))
+
     def resample_for_target(self, df: pd.DataFrame):
         """
         Resamples segments towards the target based on the given
@@ -1571,7 +1668,7 @@ class CustomDriver(DeepDriveMDDriver):
             self.split_with_combinations(df, num_resamples, num_resamples)
             self.merge_with_combinations(df, 2 * num_resamples, num_resamples)
 
-    def resample_with_clusters(self, df: pd.DataFrame):
+    def complex_resample_with_clusters(self, df: pd.DataFrame):
         """
         Resamples segments within each cluster following 3 different strategies:
         1. Ideal weight split/merges to balance weights
@@ -1580,7 +1677,6 @@ class CustomDriver(DeepDriveMDDriver):
 
         Args:
             df (pd.DataFrame): The input DataFrame.
-            seg_labels (np.ndarray): The array of cluster labels.
         """
         # Set of all the cluster ids
         cluster_ids = sorted(set(df.ls_cluster.values))
@@ -1632,6 +1728,65 @@ class CustomDriver(DeepDriveMDDriver):
         # Regenerate the df
         df = self.recreate_df(df)
         print("After target seeking split/merge")
+        print(df)
+
+    def simplified_resample_with_clusters(self, df: pd.DataFrame):
+        """
+        An attempt at a more simplified resampling procedure that mimics the clustering method.
+        In each cluster:
+        1. Perform target seeking splits.
+        2. Adjust counts by weight in each cluster (should be only merging at this point).
+
+        Args:
+            df (pd.DataFrame): The input DataFrame.
+        """
+        # Set of all the cluster ids
+        cluster_ids = sorted(set(df.ls_cluster.values))
+        print(
+            f"Number of clusters that have segments in them currently: {len(cluster_ids)}"
+        )
+        # Ideal number of walkers per cluster
+        ideal_segs_per_cluster = int((len(df)) / len(cluster_ids))
+        print(f"Ideal number of walkers per cluster: {ideal_segs_per_cluster}")
+        print(df)
+
+        # Get the cluster ids
+        cluster_ids = sorted(set(df.ls_cluster.values))
+
+        print("Starting target seeking splits")
+        for id in cluster_ids:
+            cluster_df = self.get_cluster_df(df, id)
+            print(f"cluster_id: {id}")
+
+            # Determine how far off the cluster is from the ideal number of segments
+            num_seg_diff = ideal_segs_per_cluster - len(cluster_df)
+
+            # Determine the number of splits based on the number of segments
+            if num_seg_diff > self.cfg.max_resamples:
+                num_resamples = num_seg_diff
+            else:
+                num_resamples = self.cfg.max_resamples
+            print(
+                f"Number of resamples based on the number of walkers: {num_resamples}"
+            )
+
+            # Split the segments in the cluster
+            self.split_with_combinations(cluster_df, len(cluster_df), num_resamples)
+
+        # Regenerate the df
+        df = self.recreate_df(df)
+        print("After target seeking splits")
+        print(df)
+
+        print("Starting adjust counts split/merges")
+        for id in cluster_ids:
+            cluster_df = self.get_cluster_df(df, id)
+            print(f"cluster_id: {id}")
+            self.adjust_counts_by_weight(cluster_df, ideal_segs_per_cluster)
+
+        # Regenerate the df
+        df = self.recreate_df(df)
+        print("After adjusting count split/merge")
         print(df)
 
     def resample_with_lof(self, df: pd.DataFrame):
@@ -1822,4 +1977,7 @@ class CustomDriver(DeepDriveMDDriver):
             self.resample_with_lof(df)
         else:
             df["ls_cluster"] = seg_labels
-            self.resample_with_clusters(df)
+            if self.objective.cfg.cluster_resample_method == "complex":
+                self.complex_resample_with_clusters(df)
+            else:
+                self.simplified_resample_with_clusters(df)
