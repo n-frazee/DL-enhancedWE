@@ -4,3 +4,7 @@ traj_segs
 seg_logs
 *.h5
 *.log
+__pycache__/
+*.gp
+ANALYSIS/
+.ipynb_checkpoints/

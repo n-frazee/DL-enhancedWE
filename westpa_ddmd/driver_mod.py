@@ -14,13 +14,35 @@ log = logging.getLogger(__name__)
 
 
 class DeepDriveMDDriver(WEDriver, ABC):
+    def _process_args(self):
+        float_class = ['split_weight_limit', 'merge_weight_limit']
+        int_class = ['update_interval', 'lag_iterations', 'lof_n_neighbors', 
+                     'lof_iteration_history', 'num_we_splits', 'num_trial_splits']
+                 
+        self.cfg = westpa.rc.config.get(['west', 'ddmd'], {})
+        self.cfg.update({'train_path': None, 'machine_learning_method': None})
+        for key in self.cfg:
+            if key in int_class:
+                setattr(self, key, int(self.cfg[key]))
+            elif key in float_class:
+                setattr(self, key, float(self.cfg[key]))
+            else:
+                setattr(self, key, self.cfg[key])
+
     def __init__(self, rc=None, system=None):
         super().__init__(rc, system)
+        
+        self._process_args()
 
         self.niter: int = 0
         self.nsegs: int = 0
         self.nframes: int = 0
         self.cur_pcoords: npt.ArrayLike = []
+        self.rng = np.random.default_rng()
+        temp = np.asarray(list(product(range(self.num_we_splits+1), repeat=self.num_we_splits)), dtype=int)
+        self.split_possible = temp[np.sum(temp, axis=1) == self.num_we_splits]
+        self.split_total = sum(self.split_possible)
+        del temp
 
         # Note: Several of the getter methods that return npt.ArrayLike
         # objects use a [:, 1:] index trick to avoid the initial frame
@@ -44,28 +66,67 @@ class DeepDriveMDDriver(WEDriver, ABC):
     def _split_by_data(
         self, bin: Bin, to_split: Sequence[Segment], split_into: int
     ) -> None:
-
-        limit = self.num_we_splits
-        for idx, segment in enumerate(to_split):
-            bin.remove(segment)
-
-            if idx+1 == self.num_we_splits:
-                split_into_custom = limit
-                limit -= split_into_custom
-                print(f'forced picked {split_into_custom}')
-            else:
-                split_into_custom = np.random.randint(limit+1)
-                print(f'picked {split_into_custom}')
-                limit -= split_into_custom
-            print(f'limit: {limit}')
-          
-            new_segments_list = self._split_walker(segment, split_into_custom +1, bin)
-            bin.update(new_segments_list)
+        
+        chosen_pick = self.split_possible[self.rng.integers(self.split_total)][0]
+        
+        for segments, split_into_custom  in zip(to_split, chosen_pick):
+            bin.remove(segments)
+            new_segments_list = self._split_walker(segments, split_into_custom+1, bin)
+            bin.update(new_segments_list)         
 
     def _merge_by_data(self, bin: Bin, to_merge: Sequence[Segment]) -> None:
         bin.difference_update(to_merge)
         new_segment, parent = self._merge_walkers(to_merge, None, bin)
         bin.add(new_segment)
+
+    def get_prev_dcoords(self, iterations: int) -> npt.ArrayLike:
+        """Collect coordinates from previous iterations.
+
+        Parameters
+        ----------
+        iterations : int
+            Number of previous iterations to collect.
+
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, 3)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        back_coords = []
+        with data_manager.lock:
+            for i in range(self.niter - iterations, self.niter):
+                iter_group = data_manager.get_iter_group(i)
+                coords_raw = iter_group["auxdata/dmatrix"][:]
+                for seg in coords_raw[:, 1:]:
+                    back_coords.append(seg)
+
+        return back_coords
+
+    def get_restart_dcoords(self) -> npt.ArrayLike:
+        """Collect coordinates for restart from previous iteration.
+        Returns
+        -------
+        npt.ArrayLike
+            Coordinates with shape (N, Nsegments, Nframes, Natoms, 3)
+        """
+        # extract previous iteration data and add to curr_coords
+        data_manager = westpa.rc.get_sim_manager().data_manager
+
+        # TODO: If this function is slow, we can try direct h5 reads
+
+        back_coords = []
+        with data_manager.lock:
+            iter_group = data_manager.get_iter_group(self.niter)
+            coords_raw = iter_group["auxdata/dmatrix"][:]
+            for seg in coords_raw[:, 1:]:
+                back_coords.append(seg)
+
+        return back_coords
 
     def get_prev_rcoords(self, iterations: int) -> npt.ArrayLike:
         """Collect coordinates from previous iterations.
@@ -89,7 +150,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         with data_manager.lock:
             for i in range(self.niter - iterations, self.niter):
                 iter_group = data_manager.get_iter_group(i)
-                coords_raw = iter_group["auxdata/rcoord"][:]
+                coords_raw = iter_group["auxdata/coord"][:]
                 coords_raw = coords_raw.reshape((self.nsegs, self.nframes + 1, -1, 3))
                 for seg in coords_raw[:, 1:]:
                     back_coords.append(seg)
@@ -97,7 +158,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         return back_coords
 
     def get_restart_rcoords(self) -> npt.ArrayLike:
-        """Collect coordinates for restart from pervious iteration.
+        """Collect coordinates for restart from previous iteration.
         Returns
         -------
         npt.ArrayLike
@@ -111,7 +172,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
         back_coords = []
         with data_manager.lock:
             iter_group = data_manager.get_iter_group(self.niter)
-            coords_raw = iter_group["auxdata/rcoord"][:]
+            coords_raw = iter_group["auxdata/coord"][:]
             coords_raw = coords_raw.reshape((self.nsegs, self.nframes + 1, -1, 3))
             for seg in coords_raw[:, 1:]:
                 back_coords.append(seg)
@@ -151,6 +212,13 @@ class DeepDriveMDDriver(WEDriver, ABC):
         """Concatenate the coordinates frames from each segment."""
         rcoords = np.array(list(seg.data["rcoord"] for seg in segments))
         return rcoords.reshape(self.nsegs, self.nframes + 1, -1, 3)[:, 1:]
+        # return rcoords.reshape(self.nsegs, self.nframes, -1, 3)[:, 1:]
+
+    def get_dcoords(self, segments: Sequence[Segment]) -> npt.ArrayLike:
+        """Concatenate the coordinates frames from each segment."""
+        dcoords = np.array(list(seg.data["dmatrix"] for seg in segments))
+        return dcoords[:,1:]
+        #return rcoords.reshape(self.nsegs, self.nframes + 1, -1, 3)[:, 1:]
         # return rcoords.reshape(self.nsegs, self.nframes, -1, 3)[:, 1:]
 
     def get_pcoords(self, segments: Sequence[Segment]) -> npt.ArrayLike:
@@ -206,7 +274,7 @@ class DeepDriveMDDriver(WEDriver, ABC):
             # This checks for initializing; if niter is 0 then skip resampling
             if self.niter:
                 to_split_inds, merge_groups_inds = self.run(cur_segments)
-                print(merge_groups_inds)
+                #print(merge_groups_inds)
                 check = [len(i) for i in merge_groups_inds]
                 if to_split_inds is not None and merge_groups_inds is not None and np.max(check) <= self.num_we_splits +1 and np.min(check) > 0:
                     to_split = np.array([segments[to_split_inds]])[0]

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Set up environment for dynamics
-source $AMBERHOME/amber.sh
+#source $AMBERHOME/amber.sh
 
 # Set WESTPA-related variables
 export WEST_SIM_ROOT="$PWD"

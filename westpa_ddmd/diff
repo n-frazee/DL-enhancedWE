@@ -1,0 +1,106 @@
+47,49c47
+< 
+<         limit = self.num_we_splits
+<         for idx, segment in enumerate(to_split):
+---
+>         for segment in to_split:
+51,62c49
+< 
+<             if idx+1 == self.num_we_splits:
+<                 split_into_custom = limit
+<                 limit -= split_into_custom
+<                 print(f'forced picked {split_into_custom}')
+<             else:
+<                 split_into_custom = np.random.randint(limit+1)
+<                 print(f'picked {split_into_custom}')
+<                 limit -= split_into_custom
+<             print(f'limit: {limit}')
+<           
+<             new_segments_list = self._split_walker(segment, split_into_custom +1, bin)
+---
+>             new_segments_list = self._split_walker(segment, split_into, bin)
+69a57,105
+>     def get_prev_dcoords(self, iterations: int) -> npt.ArrayLike:
+>         """Collect coordinates from previous iterations.
+> 
+>         Parameters
+>         ----------
+>         iterations : int
+>             Number of previous iterations to collect.
+> 
+>         Returns
+>         -------
+>         npt.ArrayLike
+>             Coordinates with shape (N, Nsegments, Nframes, Natoms, 3)
+>         """
+>         # extract previous iteration data and add to curr_coords
+>         data_manager = westpa.rc.get_sim_manager().data_manager
+> 
+>         # TODO: If this function is slow, we can try direct h5 reads
+> 
+>         back_coords = []
+>         with data_manager.lock:
+>             for i in range(self.niter - iterations, self.niter):
+>                 iter_group = data_manager.get_iter_group(i)
+>                 coords_raw = iter_group["auxdata/dmatrix"][:]
+>                 for seg in coords_raw[:, 1:]:
+>                     back_coords.append(seg)
+> 
+>         return back_coords
+> 
+>     def get_restart_dcoords(self) -> npt.ArrayLike:
+>         """Collect coordinates for restart from previous iteration.
+>         Returns
+>         -------
+>         npt.ArrayLike
+>             Coordinates with shape (N, Nsegments, Nframes, Natoms, 3)
+>         """
+>         # extract previous iteration data and add to curr_coords
+>         data_manager = westpa.rc.get_sim_manager().data_manager
+> 
+>         # TODO: If this function is slow, we can try direct h5 reads
+> 
+>         back_coords = []
+>         with data_manager.lock:
+>             iter_group = data_manager.get_iter_group(self.niter)
+>             coords_raw = iter_group["auxdata/dmatrix"][:]
+>             for seg in coords_raw[:, 1:]:
+>                 back_coords.append(seg)
+> 
+>         return back_coords
+> 
+92c128
+<                 coords_raw = iter_group["auxdata/rcoord"][:]
+---
+>                 coords_raw = iter_group["auxdata/coord"][:]
+100c136
+<         """Collect coordinates for restart from pervious iteration.
+---
+>         """Collect coordinates for restart from previous iteration.
+114c150
+<             coords_raw = iter_group["auxdata/rcoord"][:]
+---
+>             coords_raw = iter_group["auxdata/coord"][:]
+159c195
+<         return dcoords[:,1:]
+---
+>         return dcoords
+216,218c252
+<                 #print(merge_groups_inds)
+<                 check = [len(i) for i in merge_groups_inds]
+<                 if to_split_inds is not None and merge_groups_inds is not None and np.max(check) <= self.num_we_splits +1 and np.min(check) > 0:
+---
+>                 if to_split_inds is not None and merge_groups_inds is not None:    
+222d255
+<                     
+226,232c259,260
+<                         if len(to_merge_inds) > 1:
+<                             to_merge = segments[to_merge_inds]
+<                             self._merge_by_data(bin_, to_merge)
+<                         else:
+<                             print(f'kmeans only has 1')
+<                 else:
+<                     print(f'skipped due to kmeans')
+---
+>                         to_merge = segments[to_merge_inds]
+>                         self._merge_by_data(bin_, to_merge)
