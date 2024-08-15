@@ -34,7 +34,7 @@ from westpa.core.segment import Segment
 from westpa.core.we_driver import WEDriver
 
 from nani import KmeansNANI, compute_scores, extended_comparison
-from config import BaseSettings
+from deepdrive_we.config import BaseSettings
 
 log = logging.getLogger(__name__)
 
