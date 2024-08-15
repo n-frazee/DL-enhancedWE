@@ -1,2 +1,2 @@
-# ntl9_ddwe
-Implementing binless WESTPA with DeepDriveMD using the ntl9 SynD object.
+# DeepDriveWESTPA
+Implementing binless WESTPA with DeepDriveMD. This repo uses the NTL9 synMD object (created by John Russo & Dan Zuckerman) as the subject and simulation engine for this example.
