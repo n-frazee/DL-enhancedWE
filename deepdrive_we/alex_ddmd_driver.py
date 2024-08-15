@@ -14,7 +14,9 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from natsort import natsorted
-mpl.use('Agg')
+from ast import literal_eval
+
+mpl.use("Agg")
 
 import mdtraj
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
@@ -937,12 +939,10 @@ class ObjectiveSettings(BaseSettings):
 
         if "knani_clusters" in westpa_config:
             # If the clusters are a string, convert it to a tuple of ints
-            try:
-                westpa_config["knani_clusters"] = int(westpa_config["knani_clusters"])
-            except ValueError:
-                westpa_config["knani_clusters"] = tuple(
-                    map(int, westpa_config["knani_clusters"].split(","))
-                )
+            westpa_config["knani_clusters"] = literal_eval(
+                westpa_config["knani_clusters"]
+            )
+
         return ObjectiveSettings(**westpa_config)
 
 
@@ -967,9 +967,9 @@ class Objective:
             "euclidean": euclidean_distances,
         }
         dist_metric = {
-            "cosine": 'cosine',
+            "cosine": "cosine",
             "euclidean_cosine": euclidean_cosine_distance,
-            "euclidean": 'minkowski',
+            "euclidean": "minkowski",
         }
 
         self.distance_function = dist_functions[self.cfg.distance_metric]
@@ -1916,13 +1916,21 @@ class CustomDriver(DeepDriveMDDriver):
             )
             # Load the cluster context
             self.objective.load_latent_context(dcoords, pcoords, weight)
+            np.save(
+                self.datasets_path / f"pcoords-{self.niter}.npy",
+                self.objective.all_pcoords,
+            )
 
             # Predict the latent space coordinates
             all_z = self.machine_learning_method.predict(self.objective.all_dcoords)
+            np.save(self.datasets_path / f"z-{self.niter}.npy", all_z)
+
             print(f"Total number of points in the latent space: {len(all_z)}")
             if self.cfg.target_point_path is not None:
                 try:
-                    all_distance = self.objective.distance_function(all_z, [self.target_point])
+                    all_distance = self.objective.distance_function(
+                        all_z, [self.target_point]
+                    )
                 except ValueError:
                     all_distance = [
                         self.objective.distance_function(z, self.target_point)
