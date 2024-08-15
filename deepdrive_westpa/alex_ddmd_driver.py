@@ -34,7 +34,7 @@ from westpa.core.segment import Segment
 from westpa.core.we_driver import WEDriver
 
 from nani import KmeansNANI, compute_scores, extended_comparison
-from deepdrive_we.config import BaseSettings
+from deepdrive_westpa.config import BaseSettings
 
 log = logging.getLogger(__name__)
 
@@ -1077,16 +1077,20 @@ class Objective:
             self.all_pcoords = pcoords
             self.all_weights = weight
 
-    def lof_function(self, all_z: np.ndarray) -> np.ndarray:
+    def lof_function(self, all_z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         # Time the LOF function
         start = time.time()
+
         # Run LOF on the full history of embeddings to assure coverage over past states
         clf = LocalOutlierFactor(
             n_neighbors=self.cfg.lof_n_neighbors, metric=self.distance_metric
         ).fit(all_z)
+        prediction = clf.predict(all_z)
+
         # Print the timing
         print(f"LOF took {time.time() - start} seconds")
-        return clf.negative_outlier_factor_
+
+        return clf.negative_outlier_factor_, prediction
 
     def kmeans_cluster_segments(self, all_z: np.ndarray) -> np.ndarray:
         # Perform the K-means clustering
@@ -1793,17 +1797,26 @@ class CustomDriver(DeepDriveMDDriver):
         Args:
             df (pd.DataFrame): The input DataFrame containing the data.
         """
-        if "outlier" in df.columns:
-            # Sort the DataFrame by outliers
-            df = df.sort_values("outlier", ascending=True)
-        else:
-            # Randomly shuffle the DataFrame
-            df = df.sample(frac=1, random_state=self.rng)
+        if "prediciton" in df.columns:
+            # All -1 values are up for splitting
+            split_df = df[df["prediction"] == -1]
 
-        # Top outliers are up for splitting
-        split_df = df.head(self.objective.cfg.lof_consider_for_resample)
-        # Bottom outliers are up for merging
-        merge_df = df.tail(self.objective.cfg.lof_consider_for_resample)
+            # All 1 values are up for merging
+            merge_df = df[df["prediction"] == 1]
+
+        else:
+            if "outlier" in df.columns:
+                # Sort the DataFrame by outliers
+                df = df.sort_values("outlier", ascending=True)
+
+            else:
+                # Randomly shuffle the DataFrame
+                df = df.sample(frac=1, random_state=self.rng)
+
+            # Top outliers are up for splitting
+            split_df = df.head(self.objective.cfg.lof_consider_for_resample)
+            # Bottom outliers are up for merging
+            merge_df = df.tail(self.objective.cfg.lof_consider_for_resample)
 
         # Remove out of weight walkers
         print("Walkers up for splitting")
@@ -1821,6 +1834,7 @@ class CustomDriver(DeepDriveMDDriver):
         # The number of walkers up for merging after removing walkers outside the threshold
         num_segs_to_merge = len(merge_df)
 
+        # TODO: This could just be min(num_segs_to_merge - 1, max_resamples)
         # If there are more walkers for merging inside the weight threshold than for splitting
         if num_segs_to_merge > 2 * num_segs_to_split:
             # Set the number of resamples based on the number of segments for splitting
@@ -1960,7 +1974,10 @@ class CustomDriver(DeepDriveMDDriver):
                 self.objective.save_latent_context(all_labels, all_outliers)
             else:
                 # Run LOF on the full history of embeddings to assure coverage over past states
-                all_outliers = self.objective.lof_function(all_z)
+                all_outliers, all_prediction = self.objective.lof_function(all_z)
+
+                # Add the prediction column
+                df["prediction"] = all_prediction[: self.nsegs]
 
                 # Plot the latent space
                 if self.niter % self.cfg.plot_interval == 0:
