@@ -17,7 +17,6 @@ from natsort import natsorted
 mpl.use('Agg')
 
 import mdtraj
-from itertools import combinations_with_replacement
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
 from scipy.sparse import coo_matrix
 from scipy.spatial import distance_matrix
@@ -33,7 +32,7 @@ from westpa.core.segment import Segment
 from westpa.core.we_driver import WEDriver
 
 from nani import KmeansNANI, compute_scores, extended_comparison
-from westpa_ddmd.config import BaseSettings
+from config import BaseSettings
 
 log = logging.getLogger(__name__)
 
