@@ -33,7 +33,7 @@ from westpa.core.h5io import tostr
 from westpa.core.segment import Segment
 from westpa.core.we_driver import WEDriver
 
-from nani import KmeansNANI, compute_scores, extended_comparison
+from deepdrive_westpa.nani import KmeansNANI, compute_scores, extended_comparison
 from deepdrive_westpa.config import BaseSettings
 
 log = logging.getLogger(__name__)

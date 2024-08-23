@@ -1,8 +1,7 @@
 from mdlearn.nn.models.vae.symmetric_conv2d_vae import SymmetricConv2dVAETrainer
-from deepdrive_westpa.alex_ddmd_driver import CVAESettings
-from deepdrive_westpa.alex_ddmd_driver import MachineLearningMethod
+from alex_ddmd_driver import CVAESettings
+from alex_ddmd_driver import MachineLearningMethod
 from scipy.spatial import distance_matrix
-from scipy.spatial.distance import cdist
 import pickle
 import numpy as np
 import pandas as pd
@@ -11,7 +10,7 @@ import pandas as pd
 def main():
     autoencoder = SymmetricConv2dVAETrainer(**CVAESettings().model_dump())
 
-    base_path = "ntl9_folding_synd/"
+    base_path = "../common_files/"
     # Load the target point coordinates
     target_point = MachineLearningMethod.get_target_point_coords(
         None, base_path + "ntl9_reference.pdb"
